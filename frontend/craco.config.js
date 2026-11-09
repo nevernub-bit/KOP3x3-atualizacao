@@ -155,6 +155,29 @@ webpackConfig.devServer = (devServerConfig) => {
     };
   }
 
+  // KOP: the preview proxy serves the app on 443, so the HMR socket must use the
+  // page's own origin. Without this the client hardcodes the internal port
+  // (wss://<host>:3000/ws) and every reload attempt times out.
+  devServerConfig.client = {
+    ...(devServerConfig.client || {}),
+    webSocketURL: "auto://0.0.0.0:0/ws",
+  };
+
+  // KOP: keep API calls on the dev-server origin (Freebuff preview). The client
+  // builds "/api" URLs when REACT_APP_BACKEND_URL is empty.
+  const apiProxy = {
+    context: ["/api"],
+    target: process.env.KOP_API_TARGET || "http://127.0.0.1:8001",
+    changeOrigin: true,
+  };
+  if (Array.isArray(devServerConfig.proxy)) {
+    devServerConfig.proxy = [...devServerConfig.proxy, apiProxy];
+  } else if (devServerConfig.proxy) {
+    devServerConfig.proxy = [devServerConfig.proxy, apiProxy];
+  } else {
+    devServerConfig.proxy = [apiProxy];
+  }
+
   return devServerConfig;
 };
 

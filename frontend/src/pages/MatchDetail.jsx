@@ -25,20 +25,28 @@ export default function MatchDetail() {
   const [selEliminated, setSelEliminated] = useState("");
   const [perfectOverlay, setPerfectOverlay] = useState(false);
   const [showResult, setShowResult] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const actionInFlight = useRef(false);
+  const loadVersion = useRef(0);
   const lastAnnouncedRef = useRef({ elim: 0, warn: {}, ended: false });
 
   const load = async () => {
+    const version = ++loadVersion.current;
     const [m, t, p] = await Promise.all([
       api.get(`/matches/${mid}`), api.get("/teams"), api.get("/players"),
     ]);
+    if (version !== loadVersion.current) return;
     setMatch(m.data); setTeams(t.data); setPlayers(p.data);
   };
-  useEffect(() => { load(); }, [mid]);
+  useEffect(() => { load().catch(() => toast.error("Não foi possível carregar os dados da partida")); }, [mid]);
 
   useEffect(() => {
     if (!match) return;
     if (match.status === "EM_ANDAMENTO" || match.status === "PAUSADA") {
-      const iv = setInterval(load, 1500);
+      const iv = setInterval(() => {
+        if (!actionInFlight.current) load().catch(() => {});
+      }, 1500);
       return () => clearInterval(iv);
     }
   }, [match?.status]);
@@ -101,43 +109,57 @@ export default function MatchDetail() {
   // Only alive players can be marked eliminated
   const eliminatedOptions = [...aliveA, ...aliveB];
 
-  const runAction = async (action, args = {}) => {
-    try { const r = await api.post(`/matches/${mid}/${action}`, args); setMatch(r.data); return r.data; }
-    catch (e) { sfx.error(); toast.error(e.response?.data?.detail || "Erro"); }
+  const runMatchMutation = async (request, errorMessage = "Erro") => {
+    if (actionInFlight.current) return null;
+    actionInFlight.current = true;
+    loadVersion.current += 1;
+    setActionBusy(true);
+    try {
+      const r = await request();
+      setMatch(r.data);
+      return r.data;
+    } catch (e) {
+      sfx.error();
+      toast.error(e.response?.data?.detail || errorMessage);
+      return null;
+    } finally {
+      actionInFlight.current = false;
+      setActionBusy(false);
+    }
   };
+  const runAction = (action, args = {}) => runMatchMutation(() => api.post(`/matches/${mid}/${action}`, args));
 
   const startMatch = async () => {
     sfx.vs();
-    await new Promise(r => setTimeout(r, 200));
-    sfx.countdown(); await new Promise(r => setTimeout(r, 500));
-    sfx.countdown(); await new Promise(r => setTimeout(r, 500));
-    sfx.countdown(); await new Promise(r => setTimeout(r, 500));
-    sfx.fight();
-    await runAction("start");
-    lastAnnouncedRef.current = { elim: match.eliminations?.length || 0, warn: {}, ended: false };
+    const result = await runMatchMutation(async () => {
+      await new Promise(r => setTimeout(r, 200));
+      sfx.countdown(); await new Promise(r => setTimeout(r, 500));
+      sfx.countdown(); await new Promise(r => setTimeout(r, 500));
+      sfx.countdown(); await new Promise(r => setTimeout(r, 500));
+      sfx.fight();
+      return api.post(`/matches/${mid}/start`);
+    });
+    if (result) lastAnnouncedRef.current = { elim: match.eliminations?.length || 0, warn: {}, ended: false };
   };
   const pauseMatch = async () => { sfx.back(); await runAction("pause"); };
   const resumeMatch = async () => { sfx.confirm(); await runAction("resume"); };
   const endMatch = async () => {
-    if (!confirm("Encerrar partida agora?")) return;
-    sfx.timeUp(); await runAction("end");
+    setConfirmAction(null);
+    sfx.timeUp();
+    await runAction("end");
   };
   const undo = async () => {
-    if (!confirm("Desfazer a última eliminação?")) return;
-    try { const r = await api.delete(`/matches/${mid}/eliminate/last`); setMatch(r.data); sfx.back(); }
-    catch (e) { toast.error(e.response?.data?.detail || "Erro"); }
+    setConfirmAction(null);
+    const result = await runMatchMutation(() => api.delete(`/matches/${mid}/eliminate/last`));
+    if (result) sfx.back();
   };
-  const toggleLock = async () => {
-    try { const r = await api.post(`/matches/${mid}/lock`); setMatch(r.data); }
-    catch (e) { toast.error(e.response?.data?.detail); }
-  };
+  const toggleLock = () => runMatchMutation(() => api.post(`/matches/${mid}/lock`), "Erro ao alterar bloqueio");
   const submitElim = async () => {
     if (!selEliminated) return toast.error("Selecione o jogador eliminado");
-    try {
-      const r = await api.post(`/matches/${mid}/eliminate`, { eliminated_id: selEliminated });
-      setMatch(r.data); setSelEliminated("");
-    } catch (e) { sfx.error(); toast.error(e.response?.data?.detail || "Erro"); }
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/eliminate`, { eliminated_id: selEliminated }));
+    if (result) setSelEliminated("");
   };
+  const chooseWinner = (teamId) => runMatchMutation(() => api.post(`/matches/${mid}/set-winner`, { winner_team_id: teamId }));
 
   const canEdit = isAdmin && !match.locked;
   const running = match.status === "EM_ANDAMENTO";
@@ -173,26 +195,26 @@ export default function MatchDetail() {
           {isAdmin && !match.locked && (
             <div className="flex flex-wrap gap-2">
               {waiting && (
-                <button data-testid="start-match-btn" onClick={startMatch} className="kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 kop-glow-red">
+                <button data-testid="start-match-btn" onClick={startMatch} disabled={actionBusy} className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 kop-glow-red">
                   <Play className="w-4 h-4" /> Start
                 </button>
               )}
               {running && (
                 <>
-                  <button data-testid="pause-match-btn" onClick={pauseMatch} className="kop-chamfer border-2 border-yellow-500 text-yellow-400 hover:bg-yellow-500 hover:text-black font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
+                  <button data-testid="pause-match-btn" onClick={pauseMatch} disabled={actionBusy} className="kop-chamfer border-2 border-yellow-500 text-yellow-400 hover:bg-yellow-500 hover:text-black disabled:opacity-50 font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
                     <Pause className="w-4 h-4" /> Pause
                   </button>
-                  <button data-testid="end-match-btn" onClick={endMatch} className="kop-chamfer border-2 border-slate-600 text-slate-300 hover:border-red-500 hover:text-red-400 font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
+                  <button data-testid="end-match-btn" onClick={() => setConfirmAction("end")} disabled={actionBusy} className="kop-chamfer border-2 border-slate-600 text-slate-300 hover:border-red-500 hover:text-red-400 disabled:opacity-50 font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
                     <Square className="w-4 h-4" /> End
                   </button>
                 </>
               )}
               {paused && (
                 <>
-                  <button data-testid="resume-match-btn" onClick={resumeMatch} className="kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 kop-glow-red">
+                  <button data-testid="resume-match-btn" onClick={resumeMatch} disabled={actionBusy} className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 kop-glow-red">
                     <Play className="w-4 h-4" /> Resume
                   </button>
-                  <button data-testid="end-match-btn-p" onClick={endMatch} className="kop-chamfer border-2 border-slate-600 text-slate-300 hover:border-red-500 hover:text-red-400 font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
+                  <button data-testid="end-match-btn-p" onClick={() => setConfirmAction("end")} disabled={actionBusy} className="kop-chamfer border-2 border-slate-600 text-slate-300 hover:border-red-500 hover:text-red-400 disabled:opacity-50 font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
                     <Square className="w-4 h-4" /> End
                   </button>
                 </>
@@ -200,7 +222,7 @@ export default function MatchDetail() {
             </div>
           )}
           {isAdmin && (
-            <button data-testid="lock-toggle-btn" onClick={toggleLock} className="text-slate-500 hover:text-red-400 border border-slate-700 kop-chamfer p-2" title={match.locked ? "Desbloquear" : "Bloquear"}>
+            <button data-testid="lock-toggle-btn" onClick={toggleLock} disabled={actionBusy} className="text-slate-500 hover:text-red-400 border border-slate-700 kop-chamfer p-2 disabled:opacity-50" title={match.locked ? "Desbloquear" : "Bloquear"}>
               {match.locked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
             </button>
           )}
@@ -263,18 +285,34 @@ export default function MatchDetail() {
               </select>
             </div>
             <div className="flex items-end gap-2">
-              <button data-testid="submit-elim-btn" onClick={submitElim}
-                className="flex-1 kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-4 py-2 kop-glow-red">
+              <button data-testid="submit-elim-btn" onClick={submitElim} disabled={actionBusy}
+                className="flex-1 kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2 kop-glow-red">
                 ▶ Eliminado
               </button>
               {elims.length > 0 && (
-                <button data-testid="undo-elim-btn" onClick={undo} title="Desfazer última"
-                  className="kop-chamfer border-2 border-slate-700 text-slate-400 hover:text-yellow-400 hover:border-yellow-400 px-3 py-2">
+                <button data-testid="undo-elim-btn" onClick={() => setConfirmAction("undo")} disabled={actionBusy} title="Desfazer última"
+                  className="kop-chamfer border-2 border-slate-700 text-slate-400 hover:text-yellow-400 hover:border-yellow-400 disabled:opacity-50 px-3 py-2">
                   <Undo2 className="w-4 h-4" />
                 </button>
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {confirmAction && (
+        <div data-testid="match-action-confirm" className="mb-4 bg-black/70 border border-yellow-500/60 kop-chamfer p-3 flex flex-wrap items-center gap-3">
+          <span className="text-sm text-yellow-300 font-display uppercase tracking-widest">
+            {confirmAction === "end" ? "Encerrar partida agora?" : "Desfazer a última eliminação?"}
+          </span>
+          <button data-testid="match-action-confirm-btn" onClick={confirmAction === "end" ? endMatch : undo} disabled={actionBusy}
+            className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-3 py-2">
+            {actionBusy ? "Processando..." : "Confirmar"}
+          </button>
+          <button data-testid="match-action-cancel-btn" onClick={() => setConfirmAction(null)} disabled={actionBusy}
+            className="kop-chamfer border-2 border-slate-700 text-slate-400 hover:text-white px-3 py-2">
+            Cancelar
+          </button>
         </div>
       )}
 
@@ -314,17 +352,17 @@ export default function MatchDetail() {
           )}
           {(match.perfect_a || match.perfect_b) && (
             <div className="mt-3 inline-block bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-black font-arcade tracking-widest px-4 py-1 kop-glow-gold animate-pulse">
-              PERFECT! 3/3 PLAYERS ALIVE
+              PERFECT! {winnerTeam?.players?.length || 0}/{winnerTeam?.players?.length || 0} PLAYERS ALIVE
             </div>
           )}
           {isAdmin && !match.locked && match.phase !== "GROUP" && match.is_draw && (
             <div className="mt-4 text-xs text-slate-400 font-display uppercase tracking-widest">
               <div className="mb-2">Playoff empatado — defina o vencedor manualmente:</div>
               <div className="flex gap-2 justify-center">
-                <button data-testid="set-winner-a" onClick={async () => { const r = await api.post(`/matches/${mid}/set-winner`, { winner_team_id: match.team_a }); setMatch(r.data); sfx.winner(); }}
-                  className="kop-chamfer border-2 border-red-500 text-red-400 px-3 py-1">{teamA?.name}</button>
-                <button data-testid="set-winner-b" onClick={async () => { const r = await api.post(`/matches/${mid}/set-winner`, { winner_team_id: match.team_b }); setMatch(r.data); sfx.winner(); }}
-                  className="kop-chamfer border-2 border-cyan-500 text-cyan-300 px-3 py-1">{teamB?.name}</button>
+                <button data-testid="set-winner-a" onClick={async () => { const r = await chooseWinner(match.team_a); if (r) sfx.winner(); }} disabled={actionBusy}
+                  className="kop-chamfer border-2 border-red-500 text-red-400 disabled:opacity-50 px-3 py-1">{teamA?.name}</button>
+                <button data-testid="set-winner-b" onClick={async () => { const r = await chooseWinner(match.team_b); if (r) sfx.winner(); }} disabled={actionBusy}
+                  className="kop-chamfer border-2 border-cyan-500 text-cyan-300 disabled:opacity-50 px-3 py-1">{teamB?.name}</button>
               </div>
             </div>
           )}
@@ -343,7 +381,7 @@ export default function MatchDetail() {
               textShadow: "0 0 60px rgba(234,179,8,0.9)",
             }}>PERFECT!</div>
             <div className="mt-4 font-arcade text-3xl sm:text-5xl text-white uppercase">{winnerTeam.name}</div>
-            <div className="mt-2 text-cyan-300 font-display uppercase tracking-widest">3/3 PLAYERS ALIVE · +2 BONUS</div>
+            <div className="mt-2 text-cyan-300 font-display uppercase tracking-widest">{winnerTeam?.players?.length || 0}/{winnerTeam?.players?.length || 0} PLAYERS ALIVE · +2 BONUS</div>
             <div className="mt-6 flex gap-3 justify-center">
               {(winnerTeam.players || []).map(pid => byId[pid] && (
                 <PlayerCard key={pid} player={byId[pid]} size="md" />

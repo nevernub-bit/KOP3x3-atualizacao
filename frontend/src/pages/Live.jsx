@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { PlayerCard } from "../components/PlayerCard";
@@ -79,14 +79,19 @@ function HPBar({ alive, total, mirror = false, color = "cyan", teamName, roster 
 }
 
 function StandingsView({ teams }) {
-  const [rows, setRows] = useState({ A: [], B: [] });
+  const [rows, setRows] = useState({});
+  const [qpg, setQpg] = useState(2);
   useEffect(() => {
-    const iv = setInterval(() => api.get("/standings").then(r => setRows(r.data)), 3000);
-    api.get("/standings").then(r => setRows(r.data));
+    const loadRows = () => {
+      api.get("/standings").then(r => setRows(r.data || {}));
+      api.get("/tournament").then(r => setQpg(r.data?.qualifiers_per_group || 2)).catch(() => {});
+    };
+    loadRows();
+    const iv = setInterval(loadRows, 3000);
     return () => clearInterval(iv);
   }, []);
-  const Row = ({ r, i, color }) => (
-    <tr className={`border-t border-slate-800 ${i < 2 ? "bg-red-500/10" : ""}`}>
+  const Row = ({ r, i, color, qualified }) => (
+    <tr className={`border-t border-slate-800 ${qualified ? "bg-red-500/10" : ""}`}>
       <td className="p-3 font-mono-num text-2xl">{i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1 + "º"}</td>
       <td className="p-3 font-arcade uppercase text-white text-2xl truncate">{r.team_name}</td>
       <td className="p-3 text-right font-mono-num text-xl">{r.played}</td>
@@ -97,14 +102,14 @@ function StandingsView({ teams }) {
       <td className="p-3 text-right font-arcade text-yellow-400 text-3xl">{r.points}</td>
     </tr>
   );
-  const Group = ({ items, name, color }) => (
+  const Group = ({ items, name, color, qpg: groupQpg }) => (
     <div className="flex-1 min-w-0">
       <div className={`font-arcade text-3xl ${color} uppercase mb-2 tracking-widest`}>Grupo {name}</div>
       <table className="w-full border border-slate-800 kop-chamfer overflow-hidden">
         <thead className="bg-black/80 text-slate-500 uppercase text-xs">
           <tr><th className="p-2 text-left">POS</th><th className="p-2 text-left">Equipe</th><th className="p-2 text-right">J</th><th className="p-2 text-right">V</th><th className="p-2 text-right">E</th><th className="p-2 text-right">D</th><th className="p-2 text-right">SAL</th><th className="p-2 text-right">PTS</th></tr>
         </thead>
-        <tbody>{items.map((r, i) => <Row key={r.team_id} r={r} i={i} color={color} />)}</tbody>
+        <tbody>{items.map((r, i) => <Row key={r.team_id} r={r} i={i} color={color} qualified={i < groupQpg} />)}</tbody>
       </table>
     </div>
   );
@@ -115,8 +120,54 @@ function StandingsView({ teams }) {
         <div className="font-arcade text-4xl sm:text-6xl text-white uppercase tracking-widest mt-1">CLASSIFICAÇÃO</div>
         <div className="font-display text-xs sm:text-sm text-cyan-300 uppercase tracking-widest">Pts = 3 vitória + 2 bônus wipe · Empate/Derrota = 0</div>
       </div>
-      <div className="flex flex-col lg:flex-row gap-6"><Group items={rows.A} name="A" color="text-red-400" /><Group items={rows.B} name="B" color="text-cyan-300" /></div>
+      <div className="flex flex-col lg:flex-row flex-wrap gap-6">
+        {Object.keys(rows).sort().map((name, idx) => (
+          <Group key={name} items={rows[name] || []} name={name} qpg={qpg}
+            color={idx % 2 === 0 ? "text-red-400" : "text-cyan-300"} />
+        ))}
+      </div>
     </div>
+  );
+}
+
+// Polling do telão: um ciclo a cada 3s, nunca sobreposto, pausado com a aba oculta.
+const POLL_INTERVAL_MS = 3000;
+const REQUEST_TIMEOUT_MS = 8000;
+
+// Relógio puramente visual: re-renderiza só ele a cada 250ms. Não busca dados
+// nem recalcula partidas/classificação — por isso o tick vive aqui dentro.
+function LiveClock({ featured }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(iv);
+  }, []);
+
+  const remainingMs = useMemo(() => {
+    if (!featured) return 0;
+    if (featured.status === "EM_ANDAMENTO" && featured.started_at) {
+      const elapsed = now - new Date(featured.started_at).getTime() - (featured.pause_accumulated_ms || 0);
+      return Math.max(0, featured.duration_seconds * 1000 - elapsed);
+    }
+    return featured.remaining_ms ?? (featured.duration_seconds || 300) * 1000;
+  }, [featured, now]);
+
+  const secs = Math.ceil(remainingMs / 1000);
+  const finished = featured.status === "ENCERRADA";
+  const showBigCountdown = featured.status === "EM_ANDAMENTO" && secs <= 10 && secs > 0;
+
+  return (
+    <>
+      <div data-testid="live-timer" className={`font-mono-num font-black leading-none ${secs <= 10 && featured.status === "EM_ANDAMENTO" ? "text-red-500 animate-kop-pulse" : featured.status === "PAUSADA" ? "text-yellow-400" : finished ? "text-slate-500" : "text-white"}`}
+           style={{ fontSize: "clamp(2.5rem, 8vw, 5.5rem)", letterSpacing: "0.05em" }}>
+        {fmtTime(remainingMs)}
+      </div>
+      {showBigCountdown && (
+        <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
+          <div className="font-arcade font-black text-red-500 animate-kop-slam" style={{ fontSize: "clamp(8rem, 40vw, 24rem)", textShadow: "0 0 80px rgba(255,46,76,1)" }}>{secs}</div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -124,21 +175,65 @@ export default function Live() {
   const [matches, setMatches] = useState([]);
   const [teams, setTeams] = useState([]);
   const [players, setPlayers] = useState([]);
+  const [photos, setPhotos] = useState({});
   const [liveState, setLiveState] = useState({ mode: "MATCH", match_id: null });
-  const [tick, setTick] = useState(0);
   const [overlay, setOverlay] = useState(null);
   const lastElimsRef = useRef({}); const lastStatusRef = useRef({}); const lastCdRef = useRef({});
+  const byIdRef = useRef({});
+  const inFlightRef = useRef(false);
+  const aliveRef = useRef(true);
+  const overlayTimerRef = useRef(null);
 
-  const load = async () => {
-    const [m, t, p, s] = await Promise.all([
-      api.get("/matches"), api.get("/teams"), api.get("/players"), api.get("/live/state"),
-    ]);
-    setMatches(m.data); setTeams(t.data); setPlayers(p.data); setLiveState(s.data);
-  };
-  useEffect(() => { load(); const iv = setInterval(load, 1200); return () => clearInterval(iv); }, []);
-  useEffect(() => { const iv = setInterval(() => setTick(t => t + 1), 250); return () => clearInterval(iv); }, []);
+  // Um ciclo por vez: se a leitura anterior ainda não terminou, este é pulado.
+  const load = useCallback(async () => {
+    if (inFlightRef.current || (typeof document !== "undefined" && document.hidden)) return;
+    inFlightRef.current = true;
+    try {
+      const [m, t, p, s] = await Promise.all([
+        api.get("/matches", { timeout: REQUEST_TIMEOUT_MS }),
+        api.get("/teams", { timeout: REQUEST_TIMEOUT_MS }),
+        // Sem fotos base64 no polling: elas são buscadas à parte, só para quem está em quadra.
+        api.get("/players?photos=false", { timeout: REQUEST_TIMEOUT_MS }),
+        api.get("/live/state", { timeout: REQUEST_TIMEOUT_MS }),
+      ]);
+      if (!aliveRef.current) return;
+      setMatches(m.data); setTeams(t.data); setPlayers(p.data); setLiveState(s.data);
+    } catch (err) {
+      // mantém o último estado válido na tela e tenta de novo no próximo ciclo
+    } finally {
+      inFlightRef.current = false;
+    }
+  }, []);
 
-  const byId = Object.fromEntries(players.map(p => [p.id, p]));
+  // Um único polling por montagem, pausado enquanto a aba estiver em segundo plano.
+  useEffect(() => {
+    aliveRef.current = true;
+    let iv = null;
+    const stop = () => { if (iv !== null) { clearInterval(iv); iv = null; } };
+    const start = () => {
+      if (iv !== null || document.hidden) return;
+      load();
+      iv = setInterval(load, POLL_INTERVAL_MS);
+    };
+    const onVisibilityChange = () => { if (document.hidden) stop(); else start(); };
+    start();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      aliveRef.current = false;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [load]);
+
+  const flashOverlay = useCallback((value, ms) => {
+    if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
+    setOverlay(value);
+    overlayTimerRef.current = setTimeout(() => { overlayTimerRef.current = null; setOverlay(null); }, ms);
+  }, []);
+  useEffect(() => () => { if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current); }, []);
+
+  const byId = useMemo(() => Object.fromEntries(players.map(p => [p.id, p])), [players]);
+  byIdRef.current = byId;
 
   const featured = useMemo(() => {
     if (liveState?.match_id) return matches.find(m => m.id === liveState.match_id) || null;
@@ -149,46 +244,77 @@ export default function Live() {
       || [...matches].reverse().find(m => m.status === "ENCERRADA");
   }, [matches, liveState?.match_id]);
 
-  const remainingMs = useMemo(() => {
-    if (!featured) return 0;
-    if (featured.status === "EM_ANDAMENTO" && featured.started_at) {
-      const started = new Date(featured.started_at).getTime();
-      const elapsed = Date.now() - started - (featured.pause_accumulated_ms || 0);
-      return Math.max(0, featured.duration_seconds * 1000 - elapsed);
-    }
-    return featured.remaining_ms ?? (featured.duration_seconds || 300) * 1000;
-  }, [featured, tick]);
+  const featuredId = featured?.id;
+  const featuredStatus = featured?.status;
+  const featuredStartedAt = featured?.started_at;
+  const featuredPauseMs = featured?.pause_accumulated_ms;
+  const featuredDuration = featured?.duration_seconds;
 
+  // Avisos sonoros de tempo: timer de 1s que só toca sons — sem estado, sem
+  // re-render da tela e sem consultar o backend (o relógio visual é o LiveClock).
+  useEffect(() => {
+    if (!featuredId || featuredStatus !== "EM_ANDAMENTO" || !featuredStartedAt) return;
+    const check = () => {
+      const elapsed = Date.now() - new Date(featuredStartedAt).getTime() - (featuredPauseMs || 0);
+      const secs = Math.ceil(Math.max(0, featuredDuration * 1000 - elapsed) / 1000);
+      const cd = lastCdRef.current[featuredId] || (lastCdRef.current[featuredId] = {});
+      if (secs === 60 && !cd[60]) { cd[60] = true; sfx.timeWarn(); }
+      if (secs === 30 && !cd[30]) { cd[30] = true; sfx.timeWarn(); }
+      if (secs <= 10 && secs > 0 && !cd[secs]) { cd[secs] = true; sfx.countdown(); }
+    };
+    check();
+    const iv = setInterval(check, 1000);
+    return () => clearInterval(iv);
+  }, [featuredId, featuredStatus, featuredStartedAt, featuredPauseMs, featuredDuration]);
+
+  // Reage a mudanças vindas do backend (eliminação / status). Roda quando a partida
+  // muda — e não mais a cada tick do relógio visual.
   useEffect(() => {
     if (!featured) return;
     const key = featured.id;
     const cur = (featured.eliminations || []).length;
     const prev = lastElimsRef.current[key] || 0;
-    if (cur > prev && featured.eliminations?.length) {
-      const last = featured.eliminations[featured.eliminations.length - 1];
-      const victim = byId[last.eliminated_id];
-      if (victim) { sfx.elim(); setOverlay({ type: "ELIM", victim }); setTimeout(() => setOverlay(null), 2200); }
+    if (cur > prev && cur > 0) {
+      const last = featured.eliminations[cur - 1];
+      const victim = byIdRef.current[last.eliminated_id];
+      if (victim) { sfx.elim(); flashOverlay({ type: "ELIM", victim }, 2200); }
     }
     lastElimsRef.current[key] = cur;
-    if (featured.status === "EM_ANDAMENTO") {
-      const secs = Math.ceil(remainingMs / 1000);
-      const cd = lastCdRef.current[key] || {};
-      if (secs === 60 && !cd[60]) { cd[60] = true; sfx.timeWarn(); }
-      if (secs === 30 && !cd[30]) { cd[30] = true; sfx.timeWarn(); }
-      if (secs <= 10 && secs > 0 && !cd[secs]) { cd[secs] = true; sfx.countdown(); }
-      lastCdRef.current[key] = cd;
-    }
+
     const prevStatus = lastStatusRef.current[key];
     if (prevStatus && prevStatus !== featured.status) {
-      if (featured.status === "EM_ANDAMENTO") { sfx.fight(); setOverlay({ type: "FIGHT" }); setTimeout(() => setOverlay(null), 1500); }
+      if (featured.status === "EM_ANDAMENTO") { sfx.fight(); flashOverlay({ type: "FIGHT" }, 1500); }
       else if (featured.status === "ENCERRADA") {
-        if (featured.perfect_a || featured.perfect_b) { sfx.perfect(); setOverlay({ type: "PERFECT", match: featured }); setTimeout(() => setOverlay(null), 4000); }
-        else if (featured.is_draw) { sfx.draw(); setOverlay({ type: "DRAW", match: featured }); setTimeout(() => setOverlay(null), 3000); }
-        else { sfx.winner(); setOverlay({ type: "WINNER", match: featured }); setTimeout(() => setOverlay(null), 3500); }
+        if (featured.perfect_a || featured.perfect_b) { sfx.perfect(); flashOverlay({ type: "PERFECT", match: featured }, 4000); }
+        else if (featured.is_draw) { sfx.draw(); flashOverlay({ type: "DRAW", match: featured }, 3000); }
+        else { sfx.winner(); flashOverlay({ type: "WINNER", match: featured }, 3500); }
       }
     }
     lastStatusRef.current[key] = featured.status;
-  }, [featured?.eliminations?.length, featured?.status, remainingMs]);
+  }, [featured, flashOverlay]);
+
+  const rosterIds = useMemo(() => {
+    if (!featured) return [];
+    const ta = teams.find(t => t.id === featured.team_a);
+    const tb = teams.find(t => t.id === featured.team_b);
+    return [...(ta?.players || []), ...(tb?.players || [])];
+  }, [featured, teams]);
+  const rosterKey = rosterIds.join(",");
+
+  // Fotos (base64) apenas dos jogadores em quadra, uma vez por confronto.
+  useEffect(() => {
+    if (!rosterKey) { setPhotos({}); return; }
+    let cancelled = false;
+    api.get(`/players?ids=${encodeURIComponent(rosterKey)}&photos=true`, { timeout: REQUEST_TIMEOUT_MS })
+      .then(r => {
+        if (cancelled) return;
+        const map = {};
+        (Array.isArray(r.data) ? r.data : []).forEach(p => { if (p.photo) map[p.id] = p.photo; });
+        setPhotos(map);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [rosterKey]);
 
   // STANDINGS view
   if (liveState?.mode === "STANDINGS") {
@@ -216,13 +342,12 @@ export default function Live() {
 
   const teamA = teams.find(t => t.id === featured.team_a);
   const teamB = teams.find(t => t.id === featured.team_b);
-  const rosterA = (teamA?.players || []).map(pid => byId[pid]).filter(Boolean);
-  const rosterB = (teamB?.players || []).map(pid => byId[pid]).filter(Boolean);
+  const withPhoto = (p) => (p ? { ...p, photo: photos[p.id] || null } : null);
+  const rosterA = (teamA?.players || []).map(pid => withPhoto(byId[pid])).filter(Boolean);
+  const rosterB = (teamB?.players || []).map(pid => withPhoto(byId[pid])).filter(Boolean);
   const eliminatedIds = new Set((featured.eliminations || []).map(e => e.eliminated_id));
   const aliveA = rosterA.filter(p => !eliminatedIds.has(p.id)).length;
   const aliveB = rosterB.filter(p => !eliminatedIds.has(p.id)).length;
-  const secs = Math.ceil(remainingMs / 1000);
-  const showBigCountdown = featured.status === "EM_ANDAMENTO" && secs <= 10 && secs > 0;
   const finished = featured.status === "ENCERRADA";
   const winnerName = teams.find(t => t.id === featured.winner_team_id)?.name;
 
@@ -255,12 +380,9 @@ export default function Live() {
         )}
 
         <div className="w-full max-w-6xl mt-6 grid grid-cols-[1fr,auto,1fr] gap-3 sm:gap-6 items-start">
-          <HPBar alive={aliveA} total={rosterA.length || 3} mirror={true} color="red" teamName={teamA?.name || "TEAM A"} roster={rosterA} eliminatedIds={eliminatedIds} />
-          <div data-testid="live-timer" className={`font-mono-num font-black leading-none ${secs <= 10 && featured.status === "EM_ANDAMENTO" ? "text-red-500 animate-kop-pulse" : featured.status === "PAUSADA" ? "text-yellow-400" : finished ? "text-slate-500" : "text-white"}`}
-               style={{ fontSize: "clamp(2.5rem, 8vw, 5.5rem)", letterSpacing: "0.05em" }}>
-            {fmtTime(remainingMs)}
-          </div>
-          <HPBar alive={aliveB} total={rosterB.length || 3} mirror={false} color="cyan" teamName={teamB?.name || "TEAM B"} roster={rosterB} eliminatedIds={eliminatedIds} />
+          <HPBar alive={aliveA} total={Math.max(1, rosterA.length)} mirror={true} color="red" teamName={teamA?.name || "TEAM A"} roster={rosterA} eliminatedIds={eliminatedIds} />
+          <LiveClock featured={featured} />
+          <HPBar alive={aliveB} total={Math.max(1, rosterB.length)} mirror={false} color="cyan" teamName={teamB?.name || "TEAM B"} roster={rosterB} eliminatedIds={eliminatedIds} />
         </div>
 
         <div className="w-full max-w-6xl mt-6 grid grid-cols-[1fr,auto,1fr] gap-3 sm:gap-8 items-center">
@@ -301,11 +423,6 @@ export default function Live() {
         )}
       </div>
 
-      {showBigCountdown && (
-        <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
-          <div className="font-arcade font-black text-red-500 animate-kop-slam" style={{ fontSize: "clamp(8rem, 40vw, 24rem)", textShadow: "0 0 80px rgba(255,46,76,1)" }}>{secs}</div>
-        </div>
-      )}
       {overlay?.type === "ELIM" && (
         <div className="fixed inset-x-0 top-1/3 z-50 pointer-events-none flex flex-col items-center animate-kop-slam">
           <div className="font-arcade text-5xl sm:text-7xl text-red-500 uppercase tracking-widest" style={{ textShadow: "0 0 40px rgba(255,46,76,1)" }}>ELIMINATED!</div>

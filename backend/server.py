@@ -7,12 +7,14 @@ import os
 import uuid
 import random
 import logging
+import hashlib
+import json
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -180,8 +182,10 @@ class GroupAssignIn(BaseModel):
 
 
 class DrawIn(BaseModel):
-    num_teams: int = 10
-    players_per_team: int = 3
+    num_teams: Optional[int] = None
+    players_per_team: Optional[int] = None
+    num_groups: Optional[int] = None
+    qualifiers_per_group: Optional[int] = None
     mode: Literal["NORMAL", "BALANCED"] = "BALANCED"
 
 
@@ -198,6 +202,8 @@ class TournamentUpdate(BaseModel):
     player_limit: Optional[int] = None
     num_teams: Optional[int] = None
     players_per_team: Optional[int] = None
+    num_groups: Optional[int] = None
+    qualifiers_per_group: Optional[int] = None
     status: Optional[str] = None
     default_duration_s: Optional[int] = None
 
@@ -218,8 +224,73 @@ class LiveStateIn(BaseModel):
 DEFAULT_TEAMS = [
     "TEAM JAPAN", "TEAM YAGAMI", "TEAM IKARI", "TEAM OROCHI", "TEAM NESTS",
     "TEAM FATAL FURY", "TEAM ART OF FIGHTING", "TEAM PSYCHO SOLDIER",
-    "TEAM WOMEN FIGHTERS", "TEAM KOF HEROES",
+    "TEAM WOMEN FIGHTERS", "TEAM KOF HEROES", "TEAM KOREA", "TEAM BRAZIL",
+    "TEAM MEXICO", "TEAM ITALY", "TEAM USA", "TEAM CHINA",
 ]
+
+
+# ---------- Event structure (single source of truth) ----------
+# Team count, squad size, group layout and bracket size all come from the
+# tournament document. Nothing below assumes 10 teams / 3 players / 2 groups.
+DEFAULT_NUM_TEAMS = 10
+DEFAULT_PLAYERS_PER_TEAM = 3
+DEFAULT_NUM_GROUPS = 2
+DEFAULT_QUALIFIERS_PER_GROUP = 2
+MIN_TEAMS, MAX_TEAMS = 2, 64
+MIN_PLAYERS_PER_TEAM, MAX_PLAYERS_PER_TEAM = 1, 10
+MAX_QUALIFIERS_TOTAL = 16
+GROUP_LETTERS = "ABCDEFGHIJKLMNOP"
+PLAYOFF_PHASES = ["R16", "QF", "SEMI", "FINAL", "THIRD"]
+
+
+def is_power_of_two(n: int) -> bool:
+    return n >= 1 and (n & (n - 1)) == 0
+
+
+def tournament_config(t: dict) -> dict:
+    """Resolve the event structure, tolerating legacy documents."""
+    t = t or {}
+    num_teams = int(t.get("num_teams") or DEFAULT_NUM_TEAMS)
+    players_per_team = int(t.get("players_per_team") or DEFAULT_PLAYERS_PER_TEAM)
+    num_groups = int(t.get("num_groups") or DEFAULT_NUM_GROUPS)
+    qualifiers_per_group = int(t.get("qualifiers_per_group") or DEFAULT_QUALIFIERS_PER_GROUP)
+    return {
+        "num_teams": num_teams,
+        "players_per_team": players_per_team,
+        "num_groups": num_groups,
+        "qualifiers_per_group": qualifiers_per_group,
+        "capacity": num_teams * players_per_team,
+        "qualifiers_total": num_groups * qualifiers_per_group,
+    }
+
+
+def validate_structure(num_teams: int, players_per_team: int,
+                      num_groups: int, qualifiers_per_group: int) -> Optional[str]:
+    """Returns an error message (pt-BR) or None when the structure is valid."""
+    if not (MIN_TEAMS <= num_teams <= MAX_TEAMS):
+        return f"O torneio deve ter entre {MIN_TEAMS} e {MAX_TEAMS} equipes."
+    if not (MIN_PLAYERS_PER_TEAM <= players_per_team <= MAX_PLAYERS_PER_TEAM):
+        return (f"Cada equipe deve ter entre {MIN_PLAYERS_PER_TEAM} e "
+                f"{MAX_PLAYERS_PER_TEAM} jogadores.")
+    if not (1 <= num_groups <= num_teams):
+        return "A quantidade de grupos deve ficar entre 1 e o número de equipes."
+    min_group_size = num_teams // num_groups
+    if not (1 <= qualifiers_per_group <= min_group_size):
+        return (f"Classificados por grupo deve ficar entre 1 e {min_group_size} "
+                f"(o menor grupo tem {min_group_size} equipes).")
+    total = num_groups * qualifiers_per_group
+    if total < 2 or not is_power_of_two(total) or total > MAX_QUALIFIERS_TOTAL:
+        return ("O total de classificados (grupos × classificados por grupo) deve ser "
+                f"2, 4, 8 ou {MAX_QUALIFIERS_TOTAL} para formar um mata-mata válido.")
+    return None
+
+
+def first_playoff_phase(bracket_size: int) -> str:
+    return {2: "FINAL", 4: "SEMI", 8: "QF", 16: "R16"}[bracket_size]
+
+
+def next_playoff_phase(phase: str) -> Optional[str]:
+    return {"R16": "QF", "QF": "SEMI", "SEMI": "FINAL"}.get(phase)
 
 
 # ---------- Match helpers ----------
@@ -260,7 +331,7 @@ def compute_elapsed_ms(m) -> int:
 
 def compute_result(match, teams_by_id):
     """Official KOP 3x3 rules:
-    - A team WINS only when ALL 3 opponents are eliminated.
+    - A team WINS only when ALL opponents (whole configured roster) are eliminated.
     - DRAW when time expires and both teams still have at least 1 alive player,
       regardless of the elimination count.
     - Winner points = 3 (win) + 2 (bonus for wiping 3 opponents) = 5.
@@ -291,16 +362,21 @@ def compute_result(match, teams_by_id):
         # Both still alive (or both zero) → DRAW
         is_draw = True
 
+    # A wipe means every opponent on the roster was eliminated. The roster size
+    # comes from the event configuration (3 in classic 3x3, N in other formats).
+    wipe_a = len(b_ids) > 0 and elims_by_a >= len(b_ids)
+    wipe_b = len(a_ids) > 0 and elims_by_b >= len(a_ids)
+
     points_a = points_b = 0
     perfect_a = perfect_b = False
     if winner_id == match["team_a"]:
-        bonus = 2 if elims_by_a >= 3 else 0
+        bonus = 2 if wipe_a else 0
         points_a = 3 + bonus
-        perfect_a = (elims_by_a >= 3) and (len(eliminated_a) == 0)
+        perfect_a = wipe_a and (len(eliminated_a) == 0)
     elif winner_id == match["team_b"]:
-        bonus = 2 if elims_by_b >= 3 else 0
+        bonus = 2 if wipe_b else 0
         points_b = 3 + bonus
-        perfect_b = (elims_by_b >= 3) and (len(eliminated_b) == 0)
+        perfect_b = wipe_b and (len(eliminated_b) == 0)
 
     return {
         "elims_a": elims_by_a, "elims_b": elims_by_b,
@@ -312,6 +388,21 @@ def compute_result(match, teams_by_id):
         "is_draw": is_draw,
         "perfect_a": perfect_a, "perfect_b": perfect_b,
     }
+
+
+async def migrate_structural_defaults():
+    """Backfill ONLY missing structural fields on match documents.
+
+    Historical results (status, winner, points, eliminations, PERFECT, draw)
+    are immutable: they are never recalculated at startup, so roster changes or
+    a new draw can never rewrite finished matches. Idempotent: a second run
+    finds nothing missing and writes nothing.
+    """
+    async for m in db.matches.find({}):
+        defaults = default_match_fields(dict(m))
+        missing = {k: v for k, v in defaults.items() if k not in m}
+        if missing:
+            await db.matches.update_one({"id": m["id"]}, {"$set": missing})
 
 
 # ---------- Startup ----------
@@ -336,29 +427,36 @@ async def startup():
     if not t:
         await db.tournament.insert_one({
             "id": "main", "name": "KINGS OF PAINTBALL — KOP 3x3",
-            "num_teams": 10, "players_per_team": 3, "player_limit": 30,
+            "num_teams": DEFAULT_NUM_TEAMS, "players_per_team": DEFAULT_PLAYERS_PER_TEAM,
+            "num_groups": DEFAULT_NUM_GROUPS, "qualifiers_per_group": DEFAULT_QUALIFIERS_PER_GROUP,
+            "player_limit": DEFAULT_NUM_TEAMS * DEFAULT_PLAYERS_PER_TEAM,
             "status": "OPEN", "draw_done": False, "mvp_player_id": None,
             "default_duration_s": DEFAULT_DURATION_S, "created_at": now_iso(),
         })
-        for i, name in enumerate(DEFAULT_TEAMS):
+        for i in range(DEFAULT_NUM_TEAMS):
+            name = DEFAULT_TEAMS[i] if i < len(DEFAULT_TEAMS) else f"TEAM {i + 1:02d}"
             await db.teams.insert_one({
                 "id": str(uuid.uuid4()), "name": name, "order": i,
-                "group": "A" if i < 5 else "B", "players": [], "created_at": now_iso(),
+                "group": GROUP_LETTERS[i % DEFAULT_NUM_GROUPS], "players": [], "created_at": now_iso(),
             })
     else:
-        # ensure new field exists
+        # Backfill only missing structural fields; never recompute historical data.
+        missing = {}
         if "default_duration_s" not in t:
-            await db.tournament.update_one({"id": "main"}, {"$set": {"default_duration_s": DEFAULT_DURATION_S}})
+            missing["default_duration_s"] = DEFAULT_DURATION_S
+        if "num_groups" not in t:
+            missing["num_groups"] = DEFAULT_NUM_GROUPS
+        if "qualifiers_per_group" not in t:
+            missing["qualifiers_per_group"] = DEFAULT_QUALIFIERS_PER_GROUP
+        if "player_limit" not in t:
+            cfg = tournament_config({**t, **missing})
+            missing["player_limit"] = cfg["capacity"]
+        if missing:
+            await db.tournament.update_one({"id": "main"}, {"$set": missing})
 
-    # One-shot recompute of already-finished matches under new scoring rules.
-    # Safe & idempotent: derives everything from `eliminations` + team rosters.
-    teams = await db.teams.find({}).to_list(50)
-    teams_by_id = {t["id"]: t for t in teams}
-    finished = await db.matches.find({"status": "ENCERRADA"}).to_list(1000)
-    for fm in finished:
-        fm = default_match_fields(fm)
-        r = compute_result(fm, teams_by_id)
-        await db.matches.update_one({"id": fm["id"]}, {"$set": r})
+    # Structural-only migration. Finished matches are historical records and
+    # are never recomputed here (see migrate_structural_defaults).
+    await migrate_structural_defaults()
 
 
 @app.on_event("shutdown")
@@ -394,9 +492,10 @@ async def register_player(body: PlayerRegisterIn, request: Request):
         raise HTTPException(429, "Muitas inscrições deste IP. Tente novamente mais tarde.")
     if not body.photo.startswith("data:image/"):
         raise HTTPException(400, "Formato de foto inválido")
-    t = await db.tournament.find_one({"id": "main"})
+    t = await db.tournament.find_one({"id": "main"}) or {}
     count = await db.players.count_documents({})
-    if count >= (t.get("player_limit") or 30):
+    capacity = tournament_config(t)["capacity"]
+    if count >= capacity:
         raise HTTPException(400, "Limite de inscrições atingido")
     player = {
         "id": str(uuid.uuid4()), "name": body.name.strip(),
@@ -412,11 +511,43 @@ async def register_player(body: PlayerRegisterIn, request: Request):
 
 
 @api.get("/players")
-async def list_players(user=Depends(optional_current_user)):
-    docs = await db.players.find({}).sort("created_at", 1).to_list(1000)
+async def list_players(
+    request: Request,
+    photos: bool = True,
+    ids: Optional[str] = None,
+    user=Depends(optional_current_user),
+):
+    """Player list.
+
+    The Telão polls this endpoint every few seconds, so it asks for a compact
+    view (`photos=false`) and fetches the photos of the players actually on
+    screen separately (`ids=<id,id,...>`). Both extras are opt-in: without them
+    the response is exactly the previous full list.
+    """
+    query: dict = {}
+    if ids:
+        wanted = [i.strip() for i in ids.split(",") if i.strip()][:200]
+        query["id"] = {"$in": wanted}
+    docs = await db.players.find(query).sort("created_at", 1).to_list(1000)
     if user and user.get("role") == "admin":
-        return [clean(d) for d in docs]
-    return [public_player(d) for d in docs]
+        payload = [clean(d) for d in docs]
+    else:
+        payload = [public_player(d) for d in docs]
+    if not photos:
+        for p in payload:
+            p.pop("photo", None)
+    # The Telão polls this endpoint with base64 photos embedded, so allow
+    # conditional revalidation: unchanged data answers 304 with no body.
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    etag = '"' + hashlib.sha256(body.encode("utf-8")).hexdigest() + '"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Vary": "Authorization",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @api.get("/players/{pid}")
@@ -430,8 +561,21 @@ async def get_player(pid: str, user=Depends(optional_current_user)):
 
 @api.patch("/players/{pid}")
 async def update_player(pid: str, body: PlayerUpdateIn, _=Depends(require_admin)):
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    """Admin edit of an existing registration. Keeps the same id and all links
+    (team, matches, stats) — it never creates a second player document."""
+    raw = body.model_dump(exclude_unset=True)
+    updates = {}
+    for key, value in raw.items():
+        if key in ("name", "nickname", "whatsapp", "notes", "status") and isinstance(value, str):
+            value = value.strip()
+        if key == "name" and value is None:
+            raise HTTPException(400, "Nome obrigatório")
+        if key == "photo" and value is not None and not str(value).startswith("data:image/"):
+            # Same processing/validation contract as the original registration.
+            raise HTTPException(400, "Formato de foto inválido")
+        updates[key] = value
     if updates:
+        updates["updated_at"] = now_iso()
         r = await db.players.update_one({"id": pid}, {"$set": updates})
         if r.matched_count == 0: raise HTTPException(404, "Jogador não encontrado")
     d = await db.players.find_one({"id": pid})
@@ -495,45 +639,87 @@ def normal_split(players, num_teams, per_team):
     return teams
 
 
+async def ensure_teams(num_teams: int):
+    """Keep team slots in sync with the configured number of teams."""
+    teams = await db.teams.find({}).sort("order", 1).to_list(1000)
+    for i in range(len(teams), num_teams):
+        name = DEFAULT_TEAMS[i] if i < len(DEFAULT_TEAMS) else f"TEAM {i + 1:02d}"
+        doc = {
+            "id": str(uuid.uuid4()), "name": name, "order": i,
+            "group": None, "players": [], "created_at": now_iso(),
+        }
+        await db.teams.insert_one(doc)
+        teams.append(doc)
+    # Slots beyond the configured count are empty at this point (draw clears
+    # rosters first), so removing them cannot delete player or match data.
+    for extra in teams[num_teams:]:
+        await db.teams.delete_one({"id": extra["id"]})
+    return (await db.teams.find({}).sort("order", 1).to_list(1000))[:num_teams]
+
+
 @api.post("/draw")
 async def run_draw(body: DrawIn, _=Depends(require_admin)):
-    players = await db.players.find({"status": "CONFIRMADO"}).to_list(1000)
-    needed = body.num_teams * body.players_per_team
+    t = await db.tournament.find_one({"id": "main"}) or {}
+    cfg = tournament_config(t)
+    num_teams = body.num_teams or cfg["num_teams"]
+    players_per_team = body.players_per_team or cfg["players_per_team"]
+    num_groups = body.num_groups or cfg["num_groups"]
+    qualifiers_per_group = body.qualifiers_per_group or cfg["qualifiers_per_group"]
+    err = validate_structure(num_teams, players_per_team, num_groups, qualifiers_per_group)
+    if err:
+        raise HTTPException(400, err)
+    needed = num_teams * players_per_team
+    players = await db.players.find({"status": "CONFIRMADO"}).to_list(2000)
     if len(players) < needed:
-        raise HTTPException(400, f"Necessário {needed} jogadores, temos {len(players)}")
-    teams = await db.teams.find({}).sort("order", 1).to_list(1000)
-    if len(teams) < body.num_teams:
-        raise HTTPException(400, "Configure ao menos as equipes primeiro")
+        raise HTTPException(400, f"Necessário {needed} jogadores confirmados, temos {len(players)}")
+
     selected = players[:needed]
-    buckets = balanced_split(selected, body.num_teams, body.players_per_team) if body.mode == "BALANCED" else normal_split(selected, body.num_teams, body.players_per_team)
+    buckets = (balanced_split(selected, num_teams, players_per_team)
+               if body.mode == "BALANCED" else normal_split(selected, num_teams, players_per_team))
+
     await db.players.update_many({}, {"$set": {"team_id": None}})
-    for t in teams[:body.num_teams]:
-        await db.teams.update_one({"id": t["id"]}, {"$set": {"players": []}})
-    for i, t in enumerate(teams[:body.num_teams]):
+    await db.teams.update_many({}, {"$set": {"players": []}})
+    teams = await ensure_teams(num_teams)
+
+    for i, team in enumerate(teams):
         pids = [p["id"] for p in buckets[i]]
-        await db.teams.update_one({"id": t["id"]}, {"$set": {"players": pids}})
+        group = GROUP_LETTERS[i % num_groups]
+        await db.teams.update_one(
+            {"id": team["id"]}, {"$set": {"players": pids, "group": group}})
         for pid in pids:
-            await db.players.update_one({"id": pid}, {"$set": {"team_id": t["id"]}})
-    for i, t in enumerate(teams[:body.num_teams]):
-        await db.teams.update_one({"id": t["id"]}, {"$set": {"group": "A" if i < body.num_teams // 2 else "B"}})
+            await db.players.update_one({"id": pid}, {"$set": {"team_id": team["id"]}})
+
     await db.matches.delete_many({})
     await generate_group_matches()
     await db.tournament.update_one({"id": "main"}, {"$set": {
-        "num_teams": body.num_teams, "players_per_team": body.players_per_team,
+        "num_teams": num_teams, "players_per_team": players_per_team,
+        "num_groups": num_groups, "qualifiers_per_group": qualifiers_per_group,
+        "player_limit": needed,
         "draw_done": True, "status": "GROUPS",
+        "live_mode": "MATCH", "live_match_id": None,
     }})
-    return {"ok": True}
+    return {
+        "ok": True, "num_teams": num_teams, "players_per_team": players_per_team,
+        "num_groups": num_groups, "qualifiers_per_group": qualifiers_per_group,
+        "qualifiers_total": num_groups * qualifiers_per_group, "capacity": needed,
+    }
 
 
 async def generate_group_matches():
     teams = await db.teams.find({}).sort("order", 1).to_list(1000)
-    grp_a = [t for t in teams if t["group"] == "A" and t.get("players")]
-    grp_b = [t for t in teams if t["group"] == "B" and t.get("players")]
+    tour = await db.tournament.find_one({"id": "main"}) or {}
+    dur = tour.get("default_duration_s", DEFAULT_DURATION_S)
+
+    by_group = {}
+    for t in teams:
+        if not t.get("players"):
+            continue
+        by_group.setdefault(t.get("group") or "A", []).append(t)
+
     match_no = 1
     all_pairs = []
-    tour = await db.tournament.find_one({"id": "main"})
-    dur = tour.get("default_duration_s", DEFAULT_DURATION_S)
-    for grp_teams, gname in [(grp_a, "A"), (grp_b, "B")]:
+    for gname in sorted(by_group):
+        grp_teams = by_group[gname]
         pairs = []
         for i in range(len(grp_teams)):
             for j in range(i + 1, len(grp_teams)):
@@ -571,27 +757,85 @@ async def generate_group_matches():
 @api.get("/tournament")
 async def get_tournament():
     t = await db.tournament.find_one({"id": "main"})
-    return clean(t)
+    if not t:
+        raise HTTPException(404, "Torneio não configurado")
+    t = clean(t)
+    cfg = tournament_config(t)
+    # Derived from the event configuration — never a separate source of truth.
+    t["player_limit"] = cfg["capacity"]
+    t["capacity"] = cfg["capacity"]
+    t["qualifiers_total"] = cfg["qualifiers_total"]
+    return t
 
 
 @api.patch("/tournament")
 async def update_tournament(body: TournamentUpdate, _=Depends(require_admin)):
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
-    if updates:
-        await db.tournament.update_one({"id": "main"}, {"$set": updates})
+    t = await db.tournament.find_one({"id": "main"})
+    if not t:
+        raise HTTPException(404, "Torneio não configurado")
+    current = tournament_config(t)
+    data = body.model_dump(exclude_unset=True)
+
+    structural = ("num_teams", "players_per_team", "num_groups", "qualifiers_per_group")
+    requested = {k: int(data[k]) for k in structural if data.get(k) is not None}
+    changes = {k: v for k, v in requested.items() if v != current[k]}
+
+    if changes:
+        matches_exist = await db.matches.count_documents({}) > 0
+        if t.get("draw_done") or matches_exist:
+            raise HTTPException(409, (
+                "A estrutura já foi sorteada. Reinicie o torneio (Reset) antes de alterar "
+                "equipes, jogadores por equipe, grupos ou classificados."
+            ))
+        merged = {**current, **changes}
+        err = validate_structure(merged["num_teams"], merged["players_per_team"],
+                                 merged["num_groups"], merged["qualifiers_per_group"])
+        if err:
+            raise HTTPException(400, err)
+        players_count = await db.players.count_documents({})
+        capacity = merged["num_teams"] * merged["players_per_team"]
+        if players_count > capacity:
+            excess = players_count - capacity
+            raise HTTPException(400, (
+                f"{players_count} jogadores inscritos excedem as {capacity} vagas "
+                f"({merged['num_teams']} equipes × {merged['players_per_team']} jogadores). "
+                f"Remova {excess} inscrito(s) ou aumente as vagas antes de aplicar."
+            ))
+        data.update(changes)
+        data["player_limit"] = capacity
+
+    updates = {k: v for k, v in data.items() if v is not None}
+    # player_limit is derived from the structure; keep the stored value in sync.
+    updates["player_limit"] = (
+        (data.get("num_teams") or current["num_teams"]) *
+        (data.get("players_per_team") or current["players_per_team"])
+    )
+    await db.tournament.update_one({"id": "main"}, {"$set": updates})
     return await get_tournament()
 
 
 @api.post("/tournament/reset")
 async def reset_tournament(_=Depends(require_admin)):
-    await db.matches.delete_many({})
-    await db.teams.update_many({}, {"$set": {"players": []}})
-    await db.players.update_many({}, {"$set": {"team_id": None}})
+    """Clears the whole competition structure but keeps every registered player.
+
+    Idempotent: running it again on an already reset tournament is a no-op.
+    Matches (group stage + playoffs), teams and standings (derived from matches)
+    are removed; players keep all their data and only lose `team_id`.
+    """
+    matches = await db.matches.delete_many({})
+    teams = await db.teams.delete_many({})
+    players = await db.players.update_many({}, {"$set": {"team_id": None}})
     await db.tournament.update_one({"id": "main"}, {"$set": {
         "draw_done": False, "status": "OPEN", "mvp_player_id": None,
         "live_mode": "MATCH", "live_match_id": None,
     }})
-    return {"ok": True}
+    t = await db.tournament.find_one({"id": "main"})
+    return {
+        "ok": True,
+        "deleted": {"matches": matches.deleted_count, "teams": teams.deleted_count},
+        "players_kept": players.matched_count,
+        "tournament": await get_tournament() if t else None,
+    }
 
 
 # ---------- LIVE state (Telão control) ----------
@@ -717,6 +961,9 @@ async def resume_match(mid: str, _=Depends(require_admin)):
 
 @api.post("/matches/{mid}/end")
 async def end_match(mid: str, _=Depends(require_admin)):
+    m = await _get_match_doc(mid)
+    if m["status"] == "AGUARDANDO":
+        raise HTTPException(400, "A partida ainda não foi iniciada")
     await _finalize_match_internal(mid)
     return await get_match(mid)
 
@@ -822,7 +1069,7 @@ async def undo_last_elim(mid: str, _=Depends(require_admin)):
     if not m.get("eliminations"):
         raise HTTPException(400, "Sem eliminações para desfazer")
     await db.matches.update_one({"id": mid}, {"$pop": {"eliminations": 1}})
-    # If finished, reopen and recompute
+    # Recompute the full aggregate so the match never keeps a stale result.
     m = await _get_match_doc(mid)
     ta = await db.teams.find_one({"id": m["team_a"]})
     tb = await db.teams.find_one({"id": m["team_b"]})
@@ -832,8 +1079,19 @@ async def undo_last_elim(mid: str, _=Depends(require_admin)):
         "points_a": r["points_a"], "points_b": r["points_b"],
         "eliminated_players_a": r["eliminated_players_a"],
         "eliminated_players_b": r["eliminated_players_b"],
+        "winner_team_id": r["winner_team_id"],
+        "is_draw": r["is_draw"],
+        "perfect_a": r["perfect_a"], "perfect_b": r["perfect_b"],
     }
+    # If the match was closed by a wipe and the wipe no longer holds (and the
+    # clock has not expired), reopen it instead of leaving it ENCERRADA.
+    if m["status"] == "ENCERRADA":
+        time_up = compute_elapsed_ms(m) >= m["duration_seconds"] * 1000
+        if not time_up and r["winner_team_id"] is None:
+            update["status"] = "EM_ANDAMENTO"
+            update["ended_at"] = None
     await db.matches.update_one({"id": mid}, {"$set": update})
+    await maybe_advance_playoffs()
     return await get_match(mid)
 
 
@@ -845,7 +1103,7 @@ async def standings():
 
     def blank(t):
         return {
-            "team_id": t["id"], "team_name": t["name"], "group": t["group"],
+            "team_id": t["id"], "team_name": t["name"], "group": t.get("group") or "A",
             "played": 0, "wins": 0, "draws": 0, "losses": 0,
             "elims_for": 0, "elims_against": 0, "diff": 0, "points": 0,
         }
@@ -871,83 +1129,105 @@ async def standings():
     def sort_key(s):
         return (-s["points"], -s["wins"], -s["draws"], -s["diff"], -s["elims_for"])
 
-    grp_a = sorted([s for s in stats.values() if s["group"] == "A"], key=sort_key)
-    grp_b = sorted([s for s in stats.values() if s["group"] == "B"], key=sort_key)
-    return {"A": grp_a, "B": grp_b}
+    grouped = {}
+    for s in stats.values():
+        grouped.setdefault(s["group"], []).append(s)
+    return {name: sorted(rows, key=sort_key) for name, rows in sorted(grouped.items())}
 
 
 # ---------- Playoffs ----------
-async def maybe_advance_playoffs():
-    total_group = await db.matches.count_documents({"phase": "GROUP"})
-    done_group = await db.matches.count_documents({"phase": "GROUP", "status": "ENCERRADA"})
-    if total_group == 0 or done_group < total_group:
-        return
-    existing_semi = await db.matches.count_documents({"phase": "SEMI"})
-    if existing_semi == 0:
-        s = await standings()
-        if len(s["A"]) < 2 or len(s["B"]) < 2: return
-        a1, a2 = s["A"][0], s["A"][1]; b1, b2 = s["B"][0], s["B"][1]
-        next_num = (await db.matches.count_documents({})) + 1
-        semis = [(a1["team_id"], b2["team_id"]), (b1["team_id"], a2["team_id"])]
-        tour = await db.tournament.find_one({"id": "main"})
-        dur = tour.get("default_duration_s", DEFAULT_DURATION_S)
-        for i, (ta, tb) in enumerate(semis):
-            await db.matches.insert_one({
-                "id": str(uuid.uuid4()), "number": next_num + i,
-                "phase": "SEMI", "group": None,
-                "team_a": ta, "team_b": tb, "status": "AGUARDANDO",
-                "winner_team_id": None,
-                "elims_a": 0, "elims_b": 0, "points_a": 0, "points_b": 0,
-                "eliminated_players_a": [], "eliminated_players_b": [],
-                "eliminations": [], "duration_seconds": dur,
-                "started_at": None, "paused_at": None, "pause_accumulated_ms": 0,
-                "ended_at": None, "is_draw": False, "locked": False,
-                "perfect_a": False, "perfect_b": False,
-                "created_at": now_iso(),
-            })
-        await db.tournament.update_one({"id": "main"}, {"$set": {"status": "PLAYOFFS"}})
-        return
+def seeded_qualifiers(standings_data, num_groups, qualifiers_per_group):
+    """Seed order: rank 1 of every group, then rank 2, ... (cross-group bracket)."""
+    seeds = []
+    for rank in range(qualifiers_per_group):
+        for g in sorted(standings_data.keys()):
+            rows = standings_data.get(g) or []
+            if rank < len(rows):
+                seeds.append(rows[rank]["team_id"])
+    return seeds
 
-    total_semi = await db.matches.count_documents({"phase": "SEMI"})
-    done_semi = await db.matches.count_documents({"phase": "SEMI", "status": "ENCERRADA"})
-    existing_final = await db.matches.count_documents({"phase": "FINAL"})
-    if done_semi == total_semi and total_semi == 2 and existing_final == 0:
-        semis = await db.matches.find({"phase": "SEMI"}).sort("number", 1).to_list(10)
-        # Require both semis to have a resolved winner (admin may need to set-winner if draw)
-        if not all(s.get("winner_team_id") for s in semis):
-            return
-        s1, s2 = semis[0], semis[1]
-        loser1 = s1["team_b"] if s1["winner_team_id"] == s1["team_a"] else s1["team_a"]
-        loser2 = s2["team_b"] if s2["winner_team_id"] == s2["team_a"] else s2["team_a"]
-        next_num = (await db.matches.count_documents({})) + 1
-        tour = await db.tournament.find_one({"id": "main"})
-        dur = tour.get("default_duration_s", DEFAULT_DURATION_S)
-        base = {
+
+async def _create_playoff_matches(pairs, phase, start_number):
+    tour = await db.tournament.find_one({"id": "main"}) or {}
+    dur = tour.get("default_duration_s", DEFAULT_DURATION_S)
+    for i, (ta, tb) in enumerate(pairs):
+        await db.matches.insert_one({
+            "id": str(uuid.uuid4()), "number": start_number + i,
+            "phase": phase, "group": None,
+            "team_a": ta, "team_b": tb, "status": "AGUARDANDO",
+            "winner_team_id": None,
             "elims_a": 0, "elims_b": 0, "points_a": 0, "points_b": 0,
             "eliminated_players_a": [], "eliminated_players_b": [],
             "eliminations": [], "duration_seconds": dur,
             "started_at": None, "paused_at": None, "pause_accumulated_ms": 0,
             "ended_at": None, "is_draw": False, "locked": False,
-            "perfect_a": False, "perfect_b": False, "winner_team_id": None,
-            "status": "AGUARDANDO", "created_at": now_iso(), "group": None,
-        }
-        await db.matches.insert_one({
-            "id": str(uuid.uuid4()), "number": next_num, "phase": "THIRD",
-            "team_a": loser1, "team_b": loser2, **base,
-        })
-        await db.matches.insert_one({
-            "id": str(uuid.uuid4()), "number": next_num + 1, "phase": "FINAL",
-            "team_a": s1["winner_team_id"], "team_b": s2["winner_team_id"], **base,
+            "perfect_a": False, "perfect_b": False,
+            "created_at": now_iso(),
         })
 
-    final = await db.matches.find_one({"phase": "FINAL"})
-    if final and final["status"] == "ENCERRADA" and final.get("winner_team_id"):
-        await db.tournament.update_one({"id": "main"}, {"$set": {"status": "FINISHED"}})
+
+async def maybe_advance_playoffs():
+    total_group = await db.matches.count_documents({"phase": "GROUP"})
+    done_group = await db.matches.count_documents({"phase": "GROUP", "status": "ENCERRADA"})
+    if total_group == 0 or done_group < total_group:
+        return
+
+    t = await db.tournament.find_one({"id": "main"}) or {}
+    cfg = tournament_config(t)
+    bracket = cfg["qualifiers_total"]
+    if bracket not in (2, 4, 8, 16):
+        return
+
+    playoff_count = await db.matches.count_documents({"phase": {"$in": PLAYOFF_PHASES}})
+    if playoff_count == 0:
+        s = await standings()
+        seeds = seeded_qualifiers(s, cfg["num_groups"], cfg["qualifiers_per_group"])[:bracket]
+        if len(seeds) < bracket:
+            return
+        pairs = [(seeds[i], seeds[bracket - 1 - i]) for i in range(bracket // 2)]
+        start = (await db.matches.count_documents({})) + 1
+        await _create_playoff_matches(pairs, first_playoff_phase(bracket), start)
+        await db.tournament.update_one({"id": "main"}, {"$set": {"status": "PLAYOFFS"}})
+        return
+
+    present = [ph for ph in ("R16", "QF", "SEMI", "FINAL")
+               if await db.matches.count_documents({"phase": ph})]
+    if not present:
+        return
+    current = present[-1]
+    current_matches = await db.matches.find({"phase": current}).sort("number", 1).to_list(50)
+
+    if current == "FINAL":
+        final = current_matches[0] if current_matches else None
+        if final and final["status"] == "ENCERRADA" and final.get("winner_team_id"):
+            await db.tournament.update_one({"id": "main"}, {"$set": {"status": "FINISHED"}})
+        return
+
+    if any(m["status"] != "ENCERRADA" for m in current_matches):
+        return
+    if any(not m.get("winner_team_id") for m in current_matches):
+        return
+
+    winners = [m["winner_team_id"] for m in current_matches]
+    losers = [m["team_b"] if m["winner_team_id"] == m["team_a"] else m["team_a"]
+              for m in current_matches]
+    nxt = next_playoff_phase(current)
+    if not nxt:
+        return
+    if await db.matches.count_documents({"phase": nxt}) > 0:
+        return
+
+    start = (await db.matches.count_documents({})) + 1
+    pairs = [(winners[i], winners[i + 1]) for i in range(0, len(winners) - 1, 2)]
+    await _create_playoff_matches(pairs, nxt, start)
+    if nxt == "FINAL" and bracket >= 4 and await db.matches.count_documents({"phase": "THIRD"}) == 0:
+        start_third = (await db.matches.count_documents({})) + 1
+        await _create_playoff_matches([(losers[0], losers[1])], "THIRD", start_third)
 
 
 @api.get("/playoffs")
 async def get_playoffs():
-    docs = await db.matches.find({"phase": {"$in": ["SEMI", "FINAL", "THIRD"]}}).sort("number", 1).to_list(50)
+    docs = await db.matches.find({"phase": {"$in": PLAYOFF_PHASES}}).sort("number", 1).to_list(100)
     return [clean(default_match_fields(d)) for d in docs]
 
 

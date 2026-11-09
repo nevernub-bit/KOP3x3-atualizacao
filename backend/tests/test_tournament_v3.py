@@ -15,8 +15,8 @@ if not BASE:
 BASE = BASE.rstrip("/")
 API = f"{BASE}/api"
 
-ADMIN_EMAIL = "nevernub@gmail.com"
-ADMIN_PASS = "KopAdmin2026!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@example.com")
+ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "test-only-password")
 
 PHOTO = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40).decode()
 

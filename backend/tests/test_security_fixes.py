@@ -15,8 +15,8 @@ if not BASE_URL:
 
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "nevernub@gmail.com"
-ADMIN_PASSWORD = "KopAdmin2026!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@example.com")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "test-only-password")
 
 # tiny valid data URL (1x1 png)
 _PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"A" * 20).decode()

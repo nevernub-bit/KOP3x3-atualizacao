@@ -2,8 +2,16 @@ import React, { useEffect, useState } from "react";
 import { api } from "../api";
 
 export default function Standings() {
-  const [s, setS] = useState({ A: [], B: [] });
-  useEffect(() => { api.get("/standings").then(r => setS(r.data)); }, []);
+  const [s, setS] = useState({});
+  const [qpg, setQpg] = useState(2);
+  useEffect(() => {
+    Promise.all([api.get("/standings"), api.get("/tournament")]).then(([r, t]) => {
+      setS(r.data || {});
+      setQpg(t.data?.qualifiers_per_group || 2);
+    });
+  }, []);
+
+  const groups = Object.keys(s).sort();
 
   const Table = ({ rows, name, color }) => (
     <div className="mb-8">
@@ -24,9 +32,9 @@ export default function Standings() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
-              <tr key={r.team_id} data-testid={`standing-row-${r.team_id}`} className={`border-t border-slate-800 ${i < 2 ? "bg-red-500/10" : ""}`}>
-                <td className="p-2 font-mono-num text-red-400">{i === 0 ? "🥇" : i === 1 ? "🥈" : `${i + 1}º`}</td>
+            {(rows || []).map((r, i) => (
+              <tr key={r.team_id} data-testid={`standing-row-${r.team_id}`} className={`border-t border-slate-800 ${i < qpg ? "bg-red-500/10" : ""}`}>
+                <td className="p-2 font-mono-num text-red-400">{i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}º`}</td>
                 <td className="p-2 font-display uppercase text-white">{r.team_name}</td>
                 <td className="p-2 text-right font-mono-num">{r.played}</td>
                 <td className="p-2 text-right font-mono-num text-green-400">{r.wins}</td>
@@ -51,9 +59,16 @@ export default function Standings() {
         <div className="text-slate-500 text-xs mt-1 font-display tracking-widest uppercase">
           Pts = Eliminações realizadas · V = Vitória · E = Empate · D = Derrota · SAL = Saldo
         </div>
+        <div className="text-cyan-300/80 text-[10px] mt-1 font-display tracking-widest uppercase">
+          {qpg} classificado(s) por grupo
+        </div>
       </div>
-      <Table rows={s.A} name="A" color="text-red-400" />
-      <Table rows={s.B} name="B" color="text-cyan-300" />
+      {groups.length === 0 && (
+        <div className="text-slate-500 text-center py-20 font-display uppercase tracking-widest">Aguardando sorteio</div>
+      )}
+      {groups.map((g, i) => (
+        <Table key={g} rows={s[g]} name={g} color={i % 2 === 0 ? "text-red-400" : "text-cyan-300"} />
+      ))}
     </div>
   );
 }

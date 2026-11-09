@@ -23,7 +23,7 @@ export default function Stats() {
       <section>
         <div className="font-arcade text-xl text-red-400 uppercase mb-3">Ranking Individual</div>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {players.slice(0, 30).map((p, i) => (
+          {players.map((p, i) => (
             <div key={p.player_id} data-testid={`stat-player-${p.player_id}`} className="bg-black/60 border border-slate-800 kop-chamfer p-3 flex items-center gap-3">
               <div className="font-arcade text-2xl text-yellow-400 w-8 text-center">{i + 1}</div>
               {p.photo && <img src={p.photo} className="w-12 h-12 object-cover rounded border-2 border-red-500/50" alt={p.name} />}

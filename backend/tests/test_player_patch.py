@@ -12,20 +12,24 @@ Covers:
 - Regression: GET anon = public projection (no whatsapp/notes); admin = full
 - Light regression on other read endpoints and admin match actions
 """
+import os
 import base64
 import uuid
 import pytest
 import requests
 
-BASE_URL = None
-with open("/app/frontend/.env") as f:
-    for line in f:
-        if line.startswith("REACT_APP_BACKEND_URL="):
-            BASE_URL = line.split("=", 1)[1].strip().strip('"').rstrip("/")
+# Load BASE_URL from the environment, falling back to frontend/.env
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL")
+if not BASE_URL:
+    with open("/app/frontend/.env") as f:
+        for line in f:
+            if line.startswith("REACT_APP_BACKEND_URL="):
+                BASE_URL = line.split("=", 1)[1].strip().strip('"')
+BASE_URL = BASE_URL.rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "nevernub@gmail.com"
-ADMIN_PASSWORD = "KopAdmin2026!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@example.com")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "test-only-password")
 
 _PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"A" * 20).decode()
 TINY_PHOTO = f"data:image/png;base64,{_PNG}"
