@@ -165,7 +165,8 @@ def test_03_undo_keeps_match_consistent(admin_h):
     assert undone["status"] == "EM_ANDAMENTO", f"stale status: {undone['status']}"
     assert undone["winner_team_id"] is None, "stale winner after undo"
     assert undone["is_draw"] is True, "draw flag not recomputed"
-    assert undone["points_a"] == 0 and undone["points_b"] == 0, "stale points after undo"
+    # 2 eliminations still on the board → draw with 2 points for A (no bonus).
+    assert undone["points_a"] == 2 and undone["points_b"] == 0, "stale points after undo"
     assert undone["perfect_a"] is False and undone["perfect_b"] is False
     assert undone["ended_at"] is None
     assert undone["elims_a"] == 2 and undone["elims_b"] == 0

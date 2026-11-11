@@ -42,7 +42,11 @@ export default function Matches() {
                 </div>
                 {m.status === "ENCERRADA" && (
                   <div className="mt-2 font-mono-num text-sm flex justify-between text-cyan-300">
-                    <span>{m.points_a}</span><span>{m.points_b}</span>
+                    <span>{m.points_a}</span>
+                    <span className={m.wo ? "text-amber-400 font-display uppercase text-[10px] tracking-widest" : "text-slate-600"}>
+                      {m.wo ? "W.O." : `${m.elims_a} × ${m.elims_b}`}
+                    </span>
+                    <span>{m.points_b}</span>
                   </div>
                 )}
               </Link>

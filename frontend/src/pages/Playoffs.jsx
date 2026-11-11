@@ -13,9 +13,10 @@ const PHASES = [
 export default function Playoffs() {
   const [matches, setMatches] = useState([]);
   const [teams, setTeams] = useState([]);
+  const [bracketStatus, setBracketStatus] = useState(null);
   useEffect(() => {
-    Promise.all([api.get("/playoffs"), api.get("/teams")]).then(([p, t]) => {
-      setMatches(p.data); setTeams(t.data);
+    Promise.all([api.get("/playoffs"), api.get("/teams"), api.get("/bracket/status")]).then(([p, t, b]) => {
+      setMatches(p.data); setTeams(t.data); setBracketStatus(b.data || null);
     });
   }, []);
   const tname = id => teams.find(t => t.id === id)?.name || "TBD";
@@ -44,6 +45,12 @@ export default function Playoffs() {
         <div className="font-display text-cyan-300 text-xs tracking-[0.4em] uppercase">Elimination Round</div>
         <h1 className="font-arcade text-4xl text-red-500 uppercase animate-kop-pulse">Mata-Mata</h1>
       </div>
+
+      {bracketStatus?.stale && (
+        <div data-testid="bracket-warning" className="mb-5 border-2 border-red-500/60 bg-red-950/40 kop-chamfer p-3 text-center text-xs text-red-300 uppercase tracking-widest">
+          ⚠ Chaveamento possivelmente inválido: {bracketStatus.reason} Aguarde a revisão administrativa.
+        </div>
+      )}
 
       {present.length === 0 && (
         <div className="bg-black/40 border-2 border-dashed border-slate-800 kop-chamfer p-8 text-center text-slate-600 font-display uppercase tracking-widest text-xs">

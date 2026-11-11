@@ -22,10 +22,20 @@ Nomes de equipes do universo KOF.
 - **Vitória** só acontece quando os **3 adversários são eliminados** (wipe total).
 - **Empate** quando o cronômetro chega a 00:00 e ainda há jogador vivo nos DOIS lados
   — independentemente da contagem de eliminações.
-- **Pontuação**:
-  - Vencedor = 3 (vitória) + 2 (bônus por eliminar os 3 adversários) = **5 pts**
-  - Perdedor = 0 pts. Empate = 0 pts para ambos.
-- **PERFECT**: vencedor com 3 eliminações + 0 perdidos (visual/stat, sem pts extras).
+- **Pontuação (v2 — Nov 2026)**:
+  - Cada eliminação vale **1 ponto** para a equipe que eliminou.
+  - **+2** de bônus apenas com vencedor único (3 adversários eliminados): **5 pts**.
+  - Empate mantém os pontos das eliminações (2×1 = 2×1; 2×2 = 2×2; nunca 5×5).
+  - Perdedor mantém os pontos das eliminações (3×1 = 5×1; 3×2 = 5×2).
+- **PERFECT**: vitória 3×0 sem baixa própria; só critério de desempate, sem pontos extras.
+- **Desempate**: pontos → vitórias → saldo → PERFECTs → confronto direto.
+  - 2 equipes empatadas: resultado direto entre elas.
+  - 3+ equipes empatadas: mini-tabela de pontos apenas nos jogos entre as empatadas.
+  - Se a mini-tabela continuar empatada, o sistema **não inventa** critério: marca
+    `tiebreak_pending` e aguarda a definição dos critérios 6/7 pela organização.
+- **Rollback do recálculo**: admin pode restaurar um snapshot de recálculo por partida,
+  com confirmação; a operação arquiva o estado anterior e é idempotente.
+- **W.O.**: 5×0 administrativo, sem eliminações fictícias; não conta como PERFECT de campo.
 - Cronômetro oficial: 5 min padrão (mín. 5s), START/PAUSE/RESUME/END, auto-end.
 - **Registro simplificado**: apenas `eliminated_id`. Killer não é rastreado.
 
@@ -36,12 +46,13 @@ Nomes de equipes do universo KOF.
 ### v3 — Regras oficiais (atual)
 - Vitória só por wipe total (compute_result Rule A).
 - Empate por tempo com jogadores vivos (Rule B), independente de elim count.
-- Pontuação 3+2=5 (vencedor) / 0 (perdedor/empate).
+- Pontuação v2: 1 por eliminação + 2 de bônus; empate mantém eliminações.
 - Campo "eliminado por" removido da UI + backend.
 - Stats individuais: matches, V/E/D, times_eliminated, perfects, survivals
   (ranking por team_wins → perfects → survivals → -times_eliminated).
-- Migração idempotente de matches ENCERRADA no startup para reprocessar
-  usando as novas regras.
+- Startup só preenche campos estruturais ausentes; resultados históricos não
+  são recalculados. Recálculo é ação explícita do admin, com preview e backup.
+- Perfil RANGER, regras públicas versionadas, banner e penalidades com auditoria.
 - MatchDetail e Live com overlay ELIMINATED! (só vítima) e DRAW/WINNER/PERFECT.
 
 ## Test Coverage

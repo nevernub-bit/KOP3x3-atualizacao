@@ -6,7 +6,7 @@ import { isMuted, setMuted, sfx } from "../sound";
 
 export function Layout({ children, hideNav = false }) {
   const loc = useLocation();
-  const { isAdmin, logout } = useAuth();
+  const { isAdmin, isRanger, logout } = useAuth();
   const [muted, setLocalMuted] = useState(isMuted());
 
   useEffect(() => {
@@ -44,6 +44,7 @@ export function Layout({ children, hideNav = false }) {
               ["/standings", "Standings"],
               ["/playoffs", "Playoffs"],
               ["/stats", "Stats"],
+              ["/rules", "Regras"],
               ["/live", "Live"],
             ].map(([to, label]) => (
               <Link key={to} to={to} onClick={() => sfx.navigate()}
@@ -63,6 +64,15 @@ export function Layout({ children, hideNav = false }) {
               <>
                 <Link to="/admin" onClick={() => sfx.select()} data-testid="admin-panel-link" className="flex items-center gap-1 text-xs font-display uppercase tracking-widest text-cyan-300 hover:text-cyan-200 border border-cyan-500/40 px-2 py-1 kop-chamfer">
                   <Shield className="w-3 h-3" /> Admin
+                </Link>
+                <button data-testid="logout-btn" onClick={() => { sfx.back(); logout(); }} className="text-slate-400 hover:text-red-500" title="Sair">
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </>
+            ) : isRanger ? (
+              <>
+                <Link to="/matches" onClick={() => sfx.select()} data-testid="ranger-panel-link" className="flex items-center gap-1 text-xs font-display uppercase tracking-widest text-yellow-300 hover:text-yellow-200 border border-yellow-500/40 px-2 py-1 kop-chamfer">
+                  <Shield className="w-3 h-3" /> Arbitragem
                 </Link>
                 <button data-testid="logout-btn" onClick={() => { sfx.back(); logout(); }} className="text-slate-400 hover:text-red-500" title="Sair">
                   <LogOut className="w-4 h-4" />

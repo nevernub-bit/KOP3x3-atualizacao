@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv } from "lucide-react";
+import { api } from "../api";
+import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv, BookOpen } from "lucide-react";
 
 const ITEMS = [
   { to: "/register", key: "INSCRICOES", label: "INSCRIÇÕES", icon: UserPlus, color: "red" },
@@ -13,6 +14,7 @@ const ITEMS = [
   { to: "/stats", key: "STATS", label: "STATS", icon: BarChart3, color: "yellow" },
   { to: "/playoffs", key: "PLAYOFFS", label: "PLAYOFFS", icon: GitFork, color: "red" },
   { to: "/champion", key: "CHAMPION", label: "CHAMPION", icon: Crown, color: "gold" },
+  { to: "/rules", key: "RULES", label: "REGRAS", icon: BookOpen, color: "gold" },
   { to: "/live", key: "LIVE", label: "KOP LIVE", icon: Tv, color: "blue" },
 ];
 
@@ -25,6 +27,14 @@ const COLOR = {
 };
 
 export default function Home() {
+  const [banner, setBanner] = useState(null);
+
+  useEffect(() => {
+    api.get("/banner")
+      .then(r => setBanner(r.data?.image || null))
+      .catch(() => setBanner(null));
+  }, []);
+
   return (
     <div className="relative overflow-hidden">
       <div className="absolute inset-0 kop-grid-bg opacity-30 pointer-events-none" />
@@ -38,6 +48,18 @@ export default function Home() {
           <p className="mt-4 font-display text-xs sm:text-sm tracking-[0.5em] text-slate-500 uppercase">
             3 Players · 1 Team · 1 Champion
           </p>
+
+          {banner && (
+            <div className="mt-8 flex justify-center">
+              <img
+                src={banner}
+                alt="Banner do evento"
+                data-testid="home-banner"
+                className="max-h-72 w-auto max-w-full object-contain border-2 border-red-900/60 kop-chamfer"
+              />
+            </div>
+          )}
+
           <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
             <Link
               to="/register"

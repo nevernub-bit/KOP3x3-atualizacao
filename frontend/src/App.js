@@ -19,6 +19,7 @@ import Stats from "./pages/Stats";
 import Champion from "./pages/Champion";
 import Live from "./pages/Live";
 import Versus from "./pages/Versus";
+import Rules from "./pages/Rules";
 
 const withLayout = (C, opts = {}) => (
   <Layout {...opts}><C /></Layout>
@@ -43,6 +44,7 @@ export default function App() {
           <Route path="/standings" element={withLayout(Standings)} />
           <Route path="/playoffs" element={withLayout(Playoffs)} />
           <Route path="/stats" element={withLayout(Stats)} />
+          <Route path="/rules" element={withLayout(Rules)} />
           <Route path="/champion" element={withLayout(Champion)} />
           <Route path="/live" element={withLayout(Live, { hideNav: true })} />
         </Routes>

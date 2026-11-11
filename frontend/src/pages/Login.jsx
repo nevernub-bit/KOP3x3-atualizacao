@@ -15,9 +15,10 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(email, pw);
-      toast.success("Bem-vindo, Organizador");
-      nav("/admin");
+      const logged = await login(email, pw);
+      const isRangerUser = logged?.role === "ranger";
+      toast.success(isRangerUser ? "Bem-vindo, Ranger" : "Bem-vindo, Organizador");
+      nav(isRangerUser ? "/matches" : "/admin");
     } catch (err) {
       toast.error(formatErr(err.response?.data?.detail) || "Falha no login");
     } finally { setLoading(false); }

@@ -1,4 +1,4 @@
-"""KOP 3x3 v3 backend integration tests: wipe-only wins, timeout draws, 5-pt wipe, no eliminator tracking."""
+"""KOP 3x3 backend integration tests: v2 scoring (1 pt/elim + 2 bonus), draws keep points, W.O., no eliminator tracking."""
 import os
 import time
 import base64
@@ -174,7 +174,8 @@ def test_09_rule_B_timeout_draw(admin):
     assert d["status"] == "ENCERRADA", d
     assert d["is_draw"] is True
     assert d["winner_team_id"] is None
-    assert d["points_a"] == 0 and d["points_b"] == 0
+    # 2 x 1 on the clock: each team keeps its elimination points.
+    assert d["points_a"] == 2 and d["points_b"] == 1
 
 
 # ---------- Manual /end mid-match → draw ----------
@@ -190,7 +191,8 @@ def test_10_manual_end_both_alive_draw(admin):
     d = r.json()
     assert d["is_draw"] is True
     assert d["winner_team_id"] is None
-    assert d["points_a"] == 0 and d["points_b"] == 0
+    # 1 x 1 draw keeps one point per team (no bonus, no 0-0 reset).
+    assert d["points_a"] == 1 and d["points_b"] == 1
 
 
 # ---------- 3-1 win (not perfect), 5 pts ----------
@@ -208,7 +210,7 @@ def test_11_three_one_win_not_perfect(admin):
     assert d["status"] == "ENCERRADA"
     assert d["winner_team_id"] == m["team_a"]
     assert d["elims_a"] == 3 and d["elims_b"] == 1
-    assert d["points_a"] == 5 and d["points_b"] == 0
+    assert d["points_a"] == 5 and d["points_b"] == 1
     assert d["perfect_a"] is False
 
 
@@ -281,9 +283,9 @@ def test_15_standings_new_rules(admin):
         match_pts_by_team[m["team_b"]] = match_pts_by_team.get(m["team_b"], 0) + m["points_b"]
     for e in entries:
         assert e["points"] == match_pts_by_team.get(e["team_id"], 0), e
-    # only winners get 5; draws contribute 0 → all points values in {0, 5, 10, ...}
+    # Draws and losses keep their elimination points, so any value is valid.
     for e in entries:
-        assert e["points"] % 5 == 0, e
+        assert e["points"] >= 0
 
 
 # ---------- Player stats new shape ----------
@@ -331,12 +333,15 @@ def test_18_recompute_new_rules_applied():
     finished = [m for m in matches if m["status"] == "ENCERRADA"]
     for m in finished:
         if m.get("is_draw"):
-            assert m["points_a"] == 0 and m["points_b"] == 0, m
+            # A draw keeps the elimination points of each team and never 5 x 5.
+            assert m["points_a"] == m["elims_a"], m
+            assert m["points_b"] == m["elims_b"], m
+            assert m["points_a"] <= 3 and m["points_b"] <= 3, m
         elif m.get("winner_team_id"):
-            if m["winner_team_id"] == m["team_a"]:
-                # winner_a must have wiped b (elims_a>=3) → 5 pts, or manual set-winner (playoff) may have 0
-                if m["phase"] == "GROUP":
-                    assert m["points_a"] == 5 and m["points_b"] == 0, m
-            else:
-                if m["phase"] == "GROUP":
-                    assert m["points_b"] == 5 and m["points_a"] == 0, m
+            if m["phase"] == "GROUP":
+                if m["winner_team_id"] == m["team_a"]:
+                    assert m["points_a"] == 5, m
+                    assert m["points_b"] == m["elims_b"], m
+                else:
+                    assert m["points_b"] == 5, m
+                    assert m["points_a"] == m["elims_a"], m

@@ -4,7 +4,7 @@ import { api, formatErr } from "../api";
 import { useAuth } from "../auth";
 import { toast } from "sonner";
 import { sfx } from "../sound";
-import { Shuffle, Trash2, RefreshCw, Lock, Unlock, Tv, Trophy, Swords, SkipForward, Pencil, Save, Users } from "lucide-react";
+import { Shuffle, Trash2, RefreshCw, Lock, Unlock, Tv, Trophy, Swords, SkipForward, Pencil, Save, Users, Image as ImageIcon, FileText, Plus, UserCheck, UserX, RotateCcw, History, AlertTriangle } from "lucide-react";
 import { PlayerEditModal } from "../components/PlayerEditModal";
 
 export default function Admin() {
@@ -24,6 +24,23 @@ export default function Admin() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
+  const [banner, setBanner] = useState(null);
+  const [bannerDraft, setBannerDraft] = useState(null);
+  const [bannerDraftName, setBannerDraftName] = useState("");
+  const bannerInputRef = useRef(null);
+  const [rules, setRules] = useState(null);
+  const [rulesDraft, setRulesDraft] = useState("");
+  const [rangers, setRangers] = useState([]);
+  const [newRanger, setNewRanger] = useState({ name: "", email: "", password: "" });
+  const [redoMatch, setRedoMatch] = useState(null);
+  const [redoReason, setRedoReason] = useState("");
+  const [historyMatch, setHistoryMatch] = useState(null);
+  const [historyDocs, setHistoryDocs] = useState([]);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [confirmRestore, setConfirmRestore] = useState(null);
+  const [bracketStatus, setBracketStatus] = useState(null);
+  const [recalc, setRecalc] = useState(null);
+  const [confirmRecalc, setConfirmRecalc] = useState(false);
   const actionInFlight = useRef(false);
   const actionBusy = pendingAction !== null;
 
@@ -33,13 +50,18 @@ export default function Admin() {
 
   const load = async () => {
     const version = ++loadVersion.current;
-    const [t, tm, p, m, l] = await Promise.all([
+    const [t, tm, p, m, l, b, ru, rg, bs] = await Promise.all([
       api.get("/tournament"), api.get("/teams"),
       api.get("/players"), api.get("/matches"),
-      api.get("/live/state"),
+      api.get("/live/state"), api.get("/banner"),
+      api.get("/rules"), api.get("/rangers"), api.get("/bracket/status"),
     ]);
     if (version !== loadVersion.current) return;
     setTour(t.data); setTeams(tm.data); setPlayers(p.data); setMatches(m.data); setLive(l.data);
+    setBanner(b.data?.image || null);
+    setRules(ru.data || null); setRulesDraft(ru.data?.content || "");
+    setRangers(rg.data || []);
+    setBracketStatus(bs.data || null);
     setCfg({
       num_teams: t.data?.num_teams ?? 10,
       players_per_team: t.data?.players_per_team ?? 3,
@@ -150,6 +172,120 @@ export default function Admin() {
   const renameTeam = (id, name) => runAdminAction(`rename-team-${id}`, () => api.patch(`/teams/${id}`, { name }), {
     errorMessage: "Falha ao renomear equipe",
   });
+
+  const selectBanner = (file) => {
+    if (!file) return;
+    if (!/^image\/(png|jpe?g|webp)$/.test(file.type)) {
+      toast.error("Use uma imagem PNG, JPEG ou WEBP");
+      return;
+    }
+    if (file.size > 900 * 1024) {
+      toast.error("Imagem muito grande (máx. 900 KB)");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setBannerDraft(reader.result);
+      setBannerDraftName(file.name);
+    };
+    reader.onerror = () => toast.error("Não foi possível ler a imagem selecionada");
+    reader.readAsDataURL(file);
+  };
+
+  const uploadBanner = () => {
+    if (!bannerDraft) return;
+    const image = bannerDraft;
+    const filename = bannerDraftName;
+    return runAdminAction("banner", async () => {
+      const r = await api.post("/banner", { image, filename });
+      setBanner(image);
+      setBannerDraft(null);
+      setBannerDraftName("");
+      toast.success("Banner do evento atualizado");
+      return r;
+    }, { refresh: false, errorMessage: "Falha ao enviar o banner" });
+  };
+  const removeBanner = () => runAdminAction("banner-del", async () => {
+    await api.delete("/banner");
+    setBanner(null);
+    toast.success("Banner removido");
+  }, { refresh: false, errorMessage: "Falha ao remover o banner" });
+
+  const saveRules = () => runAdminAction("rules", async () => {
+    const r = await api.put("/rules", { content: rulesDraft });
+    setRules(r.data);
+    toast.success(`Regras publicadas (versão ${r.data.version})`);
+    return r;
+  }, { refresh: false, errorMessage: "Falha ao salvar as regras" });
+
+  const createRanger = () => runAdminAction("ranger-create", async () => {
+    const r = await api.post("/rangers", newRanger);
+    setRangers(rs => [...rs, r.data]);
+    setNewRanger({ name: "", email: "", password: "" });
+    toast.success("Ranger criado");
+    return r;
+  }, { refresh: false, errorMessage: "Falha ao criar Ranger" });
+
+  const toggleRanger = (r) => runAdminAction(`ranger-toggle-${r.id}`, async () => {
+    if (r.active) await api.delete(`/rangers/${r.id}`);
+    else await api.patch(`/rangers/${r.id}`, { active: true });
+    setRangers(rs => rs.map(x => x.id === r.id ? { ...x, active: !r.active } : x));
+    toast.success(r.active ? "Ranger desativado" : "Ranger ativado");
+    return r;
+  }, { refresh: false, errorMessage: "Falha ao atualizar Ranger" });
+
+  const runRedo = () => {
+    const target = redoMatch;
+    setRedoMatch(null);
+    return runAdminAction("redo", async () => {
+      await api.post(`/matches/${target.id}/redo`, { confirm: true, reason: redoReason });
+      setRedoReason("");
+      toast.success("Partida invalidada e liberada para nova disputa");
+    }, { errorMessage: "Falha ao refazer a partida" });
+  };
+
+  const openHistory = async (m) => {
+    setHistoryMatch(m); setHistoryDocs([]); setConfirmRestore(null); setHistoryBusy(true);
+    try {
+      const r = await api.get(`/matches/${m.id}/history`);
+      setHistoryDocs(r.data || []);
+    } catch {
+      toast.error("Não foi possível carregar o histórico da partida");
+      setHistoryMatch(null);
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+
+  const runRestore = (h) => {
+    const target = historyMatch;
+    setConfirmRestore(null);
+    return runAdminAction(`restore-${h.id}`, async () => {
+      await api.post(`/matches/${target.id}/history/${h.id}/restore`, { confirm: true });
+      const r = await api.get(`/matches/${target.id}/history`);
+      setHistoryDocs(r.data || []);
+      toast.success("Resultado anterior restaurado e arquivado");
+      await load();
+      return r;
+    }, { refresh: false, errorMessage: "Falha ao restaurar o snapshot" });
+  };
+
+  const previewRecalc = () => runAdminAction("recalc-preview", async () => {
+    const r = await api.post("/admin/recalculate-scores", { dry_run: true, confirm: true });
+    setRecalc(r.data);
+    toast.success(`${r.data.count} partida(s) com diferença`);
+    return r;
+  }, { refresh: false, errorMessage: "Falha ao pré-visualizar o recálculo" });
+
+  const applyRecalc = () => {
+    setConfirmRecalc(false);
+    return runAdminAction("recalc-apply", async () => {
+      const r = await api.post("/admin/recalculate-scores", { dry_run: false, confirm: true });
+      setRecalc(r.data);
+      toast.success(`${r.data.applied} partida(s) recalculada(s) — anteriores arquivadas`);
+      return r;
+    }, { errorMessage: "Falha ao recalcular os resultados" });
+  };
 
   const setLiveMode = (nextMode) => runAdminAction("live-mode", () => api.post("/live/state", { mode: nextMode }), {
     refresh: false,
@@ -430,6 +566,166 @@ export default function Admin() {
         </div>
       </section>
 
+      <section className="bg-black/60 border-2 border-red-500/30 kop-chamfer p-5">
+        <div className="flex items-center gap-2 mb-2">
+          <RefreshCw className="w-5 h-5 text-red-400" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Recalcular Resultados (Regra v2)</h2>
+        </div>
+        <p className="text-[11px] text-slate-400 font-display uppercase tracking-widest mb-3">
+          1 ponto por eliminação + 2 de bônus. Cada resultado anterior é arquivado no histórico antes de mudar.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={previewRecalc} disabled={actionBusy}
+            className="kop-chamfer border-2 border-cyan-500 text-cyan-300 font-arcade uppercase tracking-widest px-4 py-2 disabled:opacity-50">
+            {pendingAction === "recalc-preview" ? "Verificando..." : "Pré-visualizar"}
+          </button>
+          <button onClick={() => setConfirmRecalc(true)} disabled={actionBusy}
+            className="kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-4 py-2 disabled:opacity-50">
+            Aplicar com backup
+          </button>
+        </div>
+        {confirmRecalc && (
+          <div className="mt-3 border border-amber-500/60 kop-chamfer p-3 flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-amber-300 font-display uppercase tracking-widest">
+              Confirmar recálculo? Os resultados anteriores serão arquivados e poderão ser restaurados.
+            </span>
+            <button onClick={applyRecalc} disabled={actionBusy}
+              className="kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-3 py-2 disabled:opacity-50">
+              {pendingAction === "recalc-apply" ? "Recalculando..." : "Confirmar"}
+            </button>
+            <button onClick={() => setConfirmRecalc(false)} disabled={actionBusy}
+              className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">
+              Cancelar
+            </button>
+          </div>
+        )}
+        {recalc && (
+          <div className="mt-3 text-xs text-slate-300 font-mono-num">
+            {recalc.dry_run ? `${recalc.count} partida(s) com diferença` : `${recalc.applied} partida(s) recalculada(s)`}
+            {(recalc.changes || []).slice(0, 8).map(c => (
+              <div key={c.match_id} className="text-[11px] text-slate-400">
+                #{c.number}: {c.before.points_a}·{c.before.points_b} → {c.after.points_a}·{c.after.points_b}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="bg-black/60 border-2 border-amber-500/40 kop-chamfer p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <ImageIcon className="w-5 h-5 text-amber-400" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Banner do Evento</h2>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-4 items-start">
+          <div className="w-full sm:w-72 h-36 bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden">
+            {bannerDraft || banner
+              ? <img src={bannerDraft || banner} alt={bannerDraft ? "Prévia do novo banner" : "Banner atual"} className="w-full h-full object-contain" />
+              : <span className="text-slate-600 text-xs font-display uppercase tracking-widest">Sem banner</span>}
+          </div>
+          <div className="space-y-2">
+            <input
+              ref={bannerInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              className="sr-only"
+              disabled={actionBusy}
+              onChange={e => { selectBanner(e.target.files?.[0]); e.target.value = ""; }}
+            />
+            <button
+              type="button"
+              onClick={() => bannerInputRef.current?.click()}
+              disabled={actionBusy}
+              className="inline-block kop-chamfer bg-amber-500 hover:bg-amber-400 text-black font-arcade uppercase tracking-widest px-4 py-2 disabled:opacity-50"
+            >
+              Selecionar banner
+            </button>
+            <div className="text-[10px] text-slate-500 font-display uppercase tracking-widest">PNG, JPEG ou WEBP · máximo 900 KB</div>
+            {bannerDraft && (
+              <>
+                <div className="text-[10px] text-cyan-300 font-display uppercase tracking-widest">Prévia: {bannerDraftName}</div>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={uploadBanner} disabled={actionBusy}
+                    className="kop-chamfer bg-cyan-500 hover:bg-cyan-400 text-black font-arcade uppercase tracking-widest px-3 py-2 disabled:opacity-50">
+                    {pendingAction === "banner" ? "Enviando..." : "Confirmar e enviar"}
+                  </button>
+                  <button onClick={() => { setBannerDraft(null); setBannerDraftName(""); }} disabled={actionBusy}
+                    className="kop-chamfer border border-slate-700 text-slate-400 px-3 py-2 disabled:opacity-50">
+                    Cancelar
+                  </button>
+                </div>
+              </>
+            )}
+            {banner && !bannerDraft && (
+              <button onClick={removeBanner} disabled={actionBusy} className="block text-red-400 hover:text-red-300 text-xs font-display uppercase tracking-widest disabled:opacity-50">
+                Remover banner
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="bg-black/60 border-2 border-cyan-500/30 kop-chamfer p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <FileText className="w-5 h-5 text-cyan-300" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Regras Públicas</h2>
+          <span className="ml-auto text-[10px] font-mono-num text-slate-500">v{rules?.version || 1}</span>
+        </div>
+        <textarea value={rulesDraft} onChange={e => setRulesDraft(e.target.value)} rows={14} disabled={actionBusy}
+          className="w-full bg-slate-900 border border-slate-700 focus:border-cyan-400 px-3 py-2 text-slate-200 text-sm font-mono outline-none"
+          placeholder="# Regulamento..." />
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button onClick={saveRules} disabled={actionBusy || !rulesDraft.trim()}
+            className="kop-chamfer bg-cyan-500 hover:bg-cyan-400 text-black font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 disabled:opacity-50">
+            <Save className="w-4 h-4" /> {pendingAction === "rules" ? "Publicando..." : "Publicar regras"}
+          </button>
+          <Link to="/rules" target="_blank" className="text-cyan-300 text-xs font-display uppercase tracking-widest">Ver página pública</Link>
+          <span className="text-[10px] text-slate-500 font-display uppercase tracking-widest">
+            Atualizado por {rules?.updated_by || "—"}
+          </span>
+        </div>
+      </section>
+
+      <section className="bg-black/60 border-2 border-yellow-500/30 kop-chamfer p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <Users className="w-5 h-5 text-yellow-300" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Rangers</h2>
+        </div>
+        <div className="grid sm:grid-cols-3 gap-2 mb-4">
+          <input value={newRanger.name} onChange={e => setNewRanger(r => ({ ...r, name: e.target.value }))} placeholder="Nome"
+            className="bg-slate-900 border border-slate-700 px-3 py-2 text-white text-sm outline-none" />
+          <input value={newRanger.email} onChange={e => setNewRanger(r => ({ ...r, email: e.target.value }))} placeholder="E-mail" type="email"
+            className="bg-slate-900 border border-slate-700 px-3 py-2 text-white text-sm outline-none" />
+          <input value={newRanger.password} onChange={e => setNewRanger(r => ({ ...r, password: e.target.value }))} placeholder="Senha (mín. 6)" type="password"
+            className="bg-slate-900 border border-slate-700 px-3 py-2 text-white text-sm outline-none" />
+        </div>
+        <button onClick={createRanger} disabled={actionBusy || !newRanger.name || !newRanger.email || newRanger.password.length < 6}
+          className="kop-chamfer bg-yellow-500 hover:bg-yellow-400 text-black font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 disabled:opacity-50">
+          <Plus className="w-4 h-4" /> {pendingAction === "ranger-create" ? "Criando..." : "Criar Ranger"}
+        </button>
+        <div className="mt-4 space-y-2">
+          {rangers.length === 0 && (
+            <div className="text-slate-500 text-xs font-display uppercase tracking-widest">Nenhum Ranger cadastrado</div>
+          )}
+          {rangers.map(r => (
+            <div key={r.id} className="border border-slate-800 p-2 flex flex-wrap items-center gap-3">
+              <div className="min-w-0">
+                <div className="text-white font-display uppercase text-sm truncate">{r.name}</div>
+                <div className="text-slate-500 text-[10px] font-mono-num truncate">{r.email}</div>
+              </div>
+              <span className={`text-[10px] px-1.5 py-0.5 border font-display uppercase tracking-widest ${r.active ? "border-green-500/50 text-green-400" : "border-red-500/50 text-red-400"}`}>
+                {r.active ? "Ativo" : "Inativo"}
+              </span>
+              <button onClick={() => toggleRanger(r)} disabled={actionBusy}
+                className="ml-auto text-xs font-display uppercase tracking-widest text-slate-300 hover:text-white disabled:opacity-50">
+                {r.active
+                  ? <><UserX className="w-3 h-3 inline mr-1" />Desativar</>
+                  : <><UserCheck className="w-3 h-3 inline mr-1" />Ativar</>}
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {editing && (
         <PlayerEditModal
           player={editing}
@@ -444,6 +740,12 @@ export default function Admin() {
 
       <section className="bg-black/60 border border-red-900/50 kop-chamfer p-5">
         <h2 className="font-display text-xl text-white uppercase tracking-widest mb-3">Partidas ({matches.length})</h2>
+        {bracketStatus?.stale && (
+          <div data-testid="bracket-warning" className="mb-3 border border-red-500/60 bg-red-950/40 kop-chamfer p-3 flex items-start gap-2 text-xs text-red-300">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span><strong>Mata-mata possivelmente inválido:</strong> {bracketStatus.reason} Revise o chaveamento antes de continuar.</span>
+          </div>
+        )}
         <div className="grid sm:grid-cols-2 gap-2">
           {matches.map(m => {
             const ta = teams.find(t => t.id === m.team_a);
@@ -457,11 +759,99 @@ export default function Admin() {
                 <span className={`text-xs uppercase ${m.status === "ENCERRADA" ? "text-green-400" : m.status === "EM_ANDAMENTO" ? "text-red-400 animate-kop-pulse" : "text-yellow-400"}`}>{m.status}</span>
                 <button data-testid={`pin-live-${m.id}`} onClick={() => pinMatch(m.id)} disabled={actionBusy} title="Fixar no telão" className={`${isPinned ? "text-cyan-300" : "text-slate-500 hover:text-cyan-300"} disabled:opacity-50`}><Tv className="w-3 h-3" /></button>
                 <Link to={`/matches/${m.id}`} data-testid={`match-open-${m.id}`} className="text-cyan-300 text-xs uppercase font-display">Abrir</Link>
+                {m.status === "ENCERRADA" && (
+                  <button data-testid={`match-redo-${m.id}`} onClick={() => { setRedoMatch(m); setRedoReason(""); }} disabled={actionBusy}
+                    title="Refazer partida" className="text-amber-500 hover:text-amber-300 disabled:opacity-50">
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                )}
+                <button data-testid={`match-history-${m.id}`} onClick={() => openHistory(m)} disabled={actionBusy}
+                  title="Histórico e restauração" className="text-slate-500 hover:text-cyan-300 disabled:opacity-50">
+                  <History className="w-3 h-3" />
+                </button>
                 <button data-testid={`match-lock-${m.id}`} onClick={() => toggleLock(m.id)} disabled={actionBusy} className="text-slate-400 disabled:opacity-50">{m.locked ? <Lock className="w-3 h-3 text-red-400" /> : <Unlock className="w-3 h-3" />}</button>
               </div>
             );
           })}
         </div>
+        {redoMatch && (
+          <div data-testid="redo-confirm" className="mt-3 border border-amber-500/60 kop-chamfer p-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-amber-300 font-display uppercase tracking-widest">
+              Refazer MATCH {String(redoMatch.number).padStart(2, "0")}? O resultado atual será arquivado.
+            </span>
+            <input value={redoReason} onChange={e => setRedoReason(e.target.value)} placeholder="Motivo (opcional)"
+              className="bg-slate-900 border border-slate-700 px-3 py-1.5 text-white text-sm outline-none" />
+            <button onClick={runRedo} disabled={actionBusy}
+              className="kop-chamfer bg-amber-500 hover:bg-amber-400 text-black font-arcade uppercase tracking-widest px-3 py-2 disabled:opacity-50">
+              Confirmar
+            </button>
+            <button onClick={() => setRedoMatch(null)} disabled={actionBusy}
+              className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">
+              Cancelar
+            </button>
+          </div>
+        )}
+
+        {historyMatch && (
+          <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+            onClick={() => setHistoryMatch(null)}>
+            <div data-testid="history-modal"
+              className="w-full max-w-2xl max-h-[80vh] overflow-auto bg-slate-950 border-2 border-cyan-500/50 kop-chamfer p-4"
+              onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-display text-cyan-300 uppercase tracking-widest text-sm">
+                  Histórico — MATCH {String(historyMatch.number).padStart(2, "0")}
+                </h3>
+                <button onClick={() => setHistoryMatch(null)} className="text-slate-400 hover:text-white text-xs uppercase">Fechar</button>
+              </div>
+              {historyBusy ? (
+                <div className="text-slate-400 text-xs uppercase">Carregando histórico...</div>
+              ) : historyDocs.length === 0 ? (
+                <div className="text-slate-500 text-xs uppercase">Nenhum snapshot arquivado para esta partida.</div>
+              ) : historyDocs.map(h => {
+                const isRecalc = h.kind === "RECALCULATION" || (h.reason || "").toLowerCase().includes("recálculo");
+                return (
+                  <div key={h.id} className="border border-slate-800 p-2 mb-2 text-xs text-slate-300">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-white font-mono-num">
+                        {h.snapshot?.points_a ?? "—"} × {h.snapshot?.points_b ?? "—"}
+                      </span>
+                      <span className="text-slate-500">{h.archived_at}</span>
+                    </div>
+                    <div className="mt-1 text-slate-400">
+                      {isRecalc ? "Snapshot de recálculo" : h.kind === "RESTORE" ? "Snapshot de restauração" : "Snapshot"}
+                      {h.reason ? ` · ${h.reason}` : ""} · versão {h.snapshot?.scoring_version ?? "legado"}
+                    </div>
+                    {h.restored_at ? (
+                      <div className="mt-1 text-green-400 uppercase">Restaurado em {h.restored_at}</div>
+                    ) : isRecalc ? (
+                      confirmRestore?.id === h.id ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 border border-amber-500/60 p-2">
+                          <span className="text-amber-300">Restaurar este snapshot? A partida volta ao resultado anterior ao recálculo.</span>
+                          <button onClick={() => runRestore(h)} disabled={actionBusy}
+                            className="kop-chamfer bg-amber-500 text-black font-arcade uppercase px-2 py-1 disabled:opacity-50">
+                            Confirmar
+                          </button>
+                          <button onClick={() => setConfirmRestore(null)} disabled={actionBusy}
+                            className="kop-chamfer border border-slate-700 text-slate-400 px-2 py-1">
+                            Cancelar
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setConfirmRestore(h)} disabled={actionBusy}
+                          className="mt-2 kop-chamfer border border-cyan-500/60 text-cyan-300 hover:bg-cyan-500 hover:text-black font-arcade uppercase px-2 py-1 disabled:opacity-50">
+                          Restaurar este snapshot
+                        </button>
+                      )
+                    ) : (
+                      <div className="mt-1 text-slate-600 uppercase">Somente leitura</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );

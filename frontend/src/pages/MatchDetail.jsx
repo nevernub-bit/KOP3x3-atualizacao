@@ -5,7 +5,7 @@ import { useAuth } from "../auth";
 import { PlayerCard } from "../components/PlayerCard";
 import { toast } from "sonner";
 import { sfx } from "../sound";
-import { Play, Pause, Square, Undo2, Clock, Lock, Unlock } from "lucide-react";
+import { Play, Pause, Square, Undo2, Clock, Lock, Unlock, AlertTriangle, RotateCcw, Gavel } from "lucide-react";
 
 function fmtTime(ms) {
   if (ms == null) return "00:00";
@@ -17,7 +17,7 @@ function fmtTime(ms) {
 
 export default function MatchDetail() {
   const { mid } = useParams();
-  const { isAdmin } = useAuth();
+  const { isAdmin, isStaff } = useAuth();
   const [match, setMatch] = useState(null);
   const [teams, setTeams] = useState([]);
   const [players, setPlayers] = useState([]);
@@ -27,6 +27,13 @@ export default function MatchDetail() {
   const [showResult, setShowResult] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [quickTarget, setQuickTarget] = useState(null);
+  const [penaltyTeam, setPenaltyTeam] = useState("");
+  const [penaltyReason, setPenaltyReason] = useState("");
+  const [showPenalty, setShowPenalty] = useState(false);
+  const [confirmWo, setConfirmWo] = useState(null);
+  const [showRedo, setShowRedo] = useState(false);
+  const [redoReason, setRedoReason] = useState("");
   const actionInFlight = useRef(false);
   const loadVersion = useRef(0);
   const lastAnnouncedRef = useRef({ elim: 0, warn: {}, ended: false });
@@ -105,9 +112,16 @@ export default function MatchDetail() {
   const isEliminated = (pid) => eliminatedIds.has(pid);
   const aliveA = rosterA.filter(p => !isEliminated(p.id));
   const aliveB = rosterB.filter(p => !isEliminated(p.id));
+  const elimEntry = Object.fromEntries(elims.map(e => [e.eliminated_id, e]));
 
-  // Only alive players can be marked eliminated
   const eliminatedOptions = [...aliveA, ...aliveB];
+  const finished = match.status === "ENCERRADA";
+  const running = match.status === "EM_ANDAMENTO";
+  const paused = match.status === "PAUSADA";
+  const waiting = match.status === "AGUARDANDO";
+  const canEdit = isStaff && !match.locked;
+  const canCorrect = canEdit && (running || paused || (finished && isAdmin));
+  const winnerTeam = teams.find(t => t.id === match.winner_team_id);
 
   const runMatchMutation = async (request, errorMessage = "Erro") => {
     if (actionInFlight.current) return null;
@@ -150,29 +164,81 @@ export default function MatchDetail() {
   };
   const undo = async () => {
     setConfirmAction(null);
-    const result = await runMatchMutation(() => api.delete(`/matches/${mid}/eliminate/last`));
+    // When the admin corrects a finished match, it stays finished.
+    const config = finished ? { params: { keep_finished: true } } : undefined;
+    const result = await runMatchMutation(() => api.delete(`/matches/${mid}/eliminate/last`, config));
     if (result) sfx.back();
   };
   const toggleLock = () => runMatchMutation(() => api.post(`/matches/${mid}/lock`), "Erro ao alterar bloqueio");
   const submitElim = async () => {
     if (!selEliminated) return toast.error("Selecione o jogador eliminado");
-    const result = await runMatchMutation(() => api.post(`/matches/${mid}/eliminate`, { eliminated_id: selEliminated }));
+    const token = `${mid}:${selEliminated}:${Date.now()}`;
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/eliminate`, {
+      eliminated_id: selEliminated, client_token: token,
+    }));
     if (result) setSelEliminated("");
   };
+  const quickEliminate = async () => {
+    if (!quickTarget) return;
+    const target = quickTarget;
+    const token = `${mid}:${target.id}:${Date.now()}`;
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/eliminate`, {
+      eliminated_id: target.id, client_token: token,
+    }));
+    if (result) { setQuickTarget(null); sfx.elim(); toast.success(`${target.name} eliminado`); }
+  };
+  const quickUndeclared = async () => {
+    if (!quickTarget) return;
+    const target = quickTarget;
+    const token = `${mid}:${target.id}:und:${Date.now()}`;
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/undeclared`, {
+      player_id: target.id, reason: "Eliminação não declarada", client_token: token,
+    }), "Erro ao registrar eliminação não declarada");
+    if (result) {
+      setQuickTarget(null); sfx.elim();
+      toast.success(`${target.name}: eliminação + −1 ponto`);
+    }
+  };
+  const undoEntry = async (entry) => {
+    const key = entry.id || entry.eliminated_id;
+    const config = finished ? { params: { keep_finished: true } } : undefined;
+    const result = await runMatchMutation(() => api.delete(`/matches/${mid}/eliminations/${key}`, config), "Erro ao desfazer eliminação");
+    if (result) sfx.back();
+  };
+  const submitPenalty = async () => {
+    if (!penaltyTeam) return toast.error("Selecione a equipe penalizada");
+    if (penaltyReason.trim().length < 3) return toast.error("Informe o motivo da penalidade");
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/penalty`, {
+      team_id: penaltyTeam, points: 1, reason: penaltyReason.trim(),
+    }), "Erro ao aplicar penalidade");
+    if (result) { setShowPenalty(false); setPenaltyReason(""); setPenaltyTeam(""); toast.success("Penalidade registrada"); }
+  };
+  const removePenalty = (pid) => runMatchMutation(() => api.delete(`/matches/${mid}/penalty/${pid}`), "Erro ao remover penalidade");
+  const declareDraw = () => runMatchMutation(() => api.post(`/matches/${mid}/declare-draw`, {
+    simultaneous: true, reason: "Eliminação simultânea",
+  }), "Erro ao declarar empate");
+  const submitWo = async (teamId) => {
+    setConfirmWo(null);
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/wo`, {
+      team_id: teamId, reason: "W.O. — equipe adversária ausente",
+    }), "Erro ao registrar W.O.");
+    if (result) sfx.winner();
+  };
+  const redoMatch = async () => {
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/redo`, {
+      confirm: true, reason: redoReason.trim(),
+    }), "Erro ao refazer partida");
+    if (result) { setShowRedo(false); setRedoReason(""); toast.success("Partida liberada para nova disputa"); }
+  };
   const chooseWinner = (teamId) => runMatchMutation(() => api.post(`/matches/${mid}/set-winner`, { winner_team_id: teamId }));
-
-  const canEdit = isAdmin && !match.locked;
-  const running = match.status === "EM_ANDAMENTO";
-  const paused = match.status === "PAUSADA";
-  const finished = match.status === "ENCERRADA";
-  const waiting = match.status === "AGUARDANDO";
-  const winnerTeam = teams.find(t => t.id === match.winner_team_id);
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="text-center mb-3">
         <div className="font-arcade text-red-400 text-sm tracking-widest uppercase">MATCH {String(match.number).padStart(2, "0")}</div>
         <div className="font-display text-xs text-cyan-300 tracking-widest uppercase">{match.phase}{match.group ? ` — GRUPO ${match.group}` : ""}</div>
+        {match.wo && <div className="mt-1 inline-block bg-amber-500 text-black font-arcade text-xs px-2 py-0.5 tracking-widest">W.O.</div>}
+        {match.redo_count > 0 && <span className="ml-2 text-[10px] font-display uppercase tracking-widest text-amber-400">refeita {match.redo_count}x</span>}
       </div>
 
       <div className="bg-black/70 border-2 border-red-900/50 kop-chamfer p-4 mb-6">
@@ -188,11 +254,11 @@ export default function MatchDetail() {
               {waiting && "AGUARDANDO"}
               {running && "EM ANDAMENTO"}
               {paused && "PAUSADA"}
-              {finished && (match.is_draw ? "EMPATE" : "ENCERRADA")}
+              {finished && (match.wo ? "W.O." : match.is_draw ? "EMPATE" : "ENCERRADA")}
             </div>
           </div>
 
-          {isAdmin && !match.locked && (
+          {canEdit && (
             <div className="flex flex-wrap gap-2">
               {waiting && (
                 <button data-testid="start-match-btn" onClick={startMatch} disabled={actionBusy} className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 kop-glow-red">
@@ -241,7 +307,15 @@ export default function MatchDetail() {
             </div>
             <div className="text-[10px] font-display tracking-widest uppercase text-slate-500">Eliminações ao vivo</div>
             {finished && (
-              <div className="mt-1 font-mono-num text-xs text-cyan-300">Pts {match.points_a} · {match.points_b}</div>
+              <div className="mt-1 font-mono-num text-xs text-cyan-300">
+                Pts {match.points_a} · {match.points_b}
+                {match.wo && <span className="text-amber-400"> · W.O.</span>}
+              </div>
+            )}
+            {((match.penalty_points_a || 0) > 0 || (match.penalty_points_b || 0) > 0) && (
+              <div className="mt-1 text-[10px] font-display uppercase tracking-widest text-red-400">
+                Penalidades: −{match.penalty_points_a || 0} / −{match.penalty_points_b || 0}
+              </div>
             )}
           </div>
           <div>
@@ -268,9 +342,56 @@ export default function MatchDetail() {
         ))}
       </div>
 
+      {canCorrect && (
+        <div data-testid="quick-elimination" className="bg-black/70 border-2 border-red-900/50 kop-chamfer p-4 mb-6">
+          <div className="font-arcade text-red-400 uppercase text-sm tracking-widest mb-1">Eliminação rápida</div>
+          <div className="text-[10px] text-slate-500 font-display uppercase tracking-widest mb-3">Toque na foto do jogador → ELIMINAR</div>
+          <div className="grid grid-cols-3 gap-2">
+            {[...rosterA, ...rosterB].map(p => {
+              const gone = isEliminated(p.id);
+              return (
+                <button
+                  key={p.id}
+                  data-testid={`quick-elim-${p.id}`}
+                  onClick={() => { if (!gone) { setQuickTarget(p); sfx.select(); } }}
+                  disabled={gone || actionBusy}
+                  className={`relative text-left disabled:cursor-not-allowed ${gone ? "opacity-30" : ""}`}
+                >
+                  <PlayerCard player={p} eliminated={gone} size="sm" showLevel={false} />
+                  {!gone && (
+                    <span className="absolute bottom-1 right-1 bg-red-600 text-white font-arcade text-[9px] px-1.5 py-0.5 uppercase tracking-widest">
+                      Eliminar
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {quickTarget && (
+        <div data-testid="quick-elim-confirm" className="mb-4 bg-black/80 border-2 border-red-500/60 kop-chamfer p-4 flex flex-wrap items-center gap-3">
+          <PlayerCard player={quickTarget} size="sm" showLevel={false} />
+          <div className="flex-1 min-w-[160px]">
+            <div className="font-arcade text-lg text-white uppercase">{quickTarget.name}</div>
+            <div className="text-xs text-slate-400 font-display uppercase tracking-widest">Confirmar eliminação?</div>
+          </div>
+          <button onClick={quickEliminate} disabled={actionBusy} className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2">
+            {actionBusy ? "Registrando..." : "▶ Eliminar"}
+          </button>
+          <button onClick={quickUndeclared} disabled={actionBusy} className="kop-chamfer border-2 border-amber-500 text-amber-300 hover:bg-amber-500 hover:text-black disabled:opacity-50 font-arcade uppercase tracking-widest px-3 py-2">
+            Não declarada ( −1 )
+          </button>
+          <button onClick={() => setQuickTarget(null)} disabled={actionBusy} className="kop-chamfer border-2 border-slate-700 text-slate-400 hover:text-white px-3 py-2">
+            Cancelar
+          </button>
+        </div>
+      )}
+
       {canEdit && running && (
         <div className="bg-black/70 border-2 border-red-900/50 kop-chamfer p-4 mb-6">
-          <div className="font-arcade text-red-400 uppercase text-sm tracking-widest mb-3">Registrar Eliminação</div>
+          <div className="font-arcade text-red-400 uppercase text-sm tracking-widest mb-3">Registro alternativo</div>
           <div className="grid sm:grid-cols-[1fr,auto] gap-3">
             <div>
               <label className="text-[10px] font-display uppercase tracking-widest text-slate-400">Jogador eliminado</label>
@@ -324,14 +445,127 @@ export default function MatchDetail() {
               const victim = byId[e.eliminated_id];
               const inA = teamA?.players?.includes(e.eliminated_id);
               return (
-                <li key={i} className="flex items-center gap-2 text-slate-300">
+                <li key={e.id || i} className="flex items-center gap-2 text-slate-300">
                   <span className="font-mono-num text-xs text-slate-500 w-14">{fmtTime(e.at_ms || 0)}</span>
-                  <span className={`font-display uppercase truncate ${inA ? "text-red-400" : "text-cyan-300"}`}>{victim?.name}</span>
+                  <span className={`font-display uppercase truncate ${inA ? "text-red-400" : "text-cyan-300"}`}>{victim?.name || e.eliminated_id}</span>
                   <span className="text-red-500 font-arcade text-xs">ELIMINATED</span>
+                  {canCorrect && (
+                    <button data-testid={`undo-elim-${e.id || e.eliminated_id}`} onClick={() => undoEntry(e)} disabled={actionBusy}
+                      title="Desfazer esta eliminação" className="ml-auto text-slate-500 hover:text-yellow-400 disabled:opacity-50">
+                      <Undo2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </li>
               );
             })}
           </ol>
+        </div>
+      )}
+
+      {(showPenalty || (match.penalties || []).length > 0) && (
+        <div data-testid="penalty-panel" className="bg-black/60 border-2 border-red-900/60 kop-chamfer p-4 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <Gavel className="w-4 h-4 text-red-400" />
+            <div className="font-arcade text-red-400 uppercase text-sm tracking-widest">Penalidades</div>
+            {isStaff && !showPenalty && (
+              <button onClick={() => setShowPenalty(true)} className="ml-auto text-xs font-display uppercase tracking-widest text-red-300 hover:text-red-200">+ Aplicar</button>
+            )}
+          </div>
+          {(match.penalties || []).length > 0 && (
+            <ul className="space-y-1 text-xs mb-3">
+              {match.penalties.map(p => (
+                <li key={p.id} className="flex flex-wrap items-center gap-2 text-slate-300">
+                  <span className="font-mono-num text-red-400">−{p.points}</span>
+                  <span className="font-display uppercase">{teams.find(t => t.id === p.team_id)?.name}</span>
+                  <span className="text-slate-400">{p.reason}</span>
+                  <span className="text-slate-600">· {p.match_status} · {p.by}</span>
+                  {isAdmin && (
+                    <button onClick={() => removePenalty(p.id)} disabled={actionBusy} className="ml-auto text-slate-500 hover:text-red-400 disabled:opacity-50" title="Remover penalidade">×</button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {showPenalty && isStaff && (
+            <div className="grid sm:grid-cols-[auto,1fr,auto] gap-2 items-end">
+              <select value={penaltyTeam} onChange={e => setPenaltyTeam(e.target.value)}
+                className="bg-slate-900 border border-slate-700 px-2 py-2 text-white text-sm outline-none">
+                <option value="">Equipe</option>
+                <option value={match.team_a}>{teamA?.name}</option>
+                <option value={match.team_b}>{teamB?.name}</option>
+              </select>
+              <input value={penaltyReason} onChange={e => setPenaltyReason(e.target.value)}
+                placeholder="Motivo da penalidade (obrigatório)"
+                className="bg-slate-900 border border-slate-700 focus:border-red-500 px-3 py-2 text-white text-sm outline-none" />
+              <div className="flex gap-2">
+                <button onClick={submitPenalty} disabled={actionBusy} className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-3 py-2">−1 pt</button>
+                <button onClick={() => setShowPenalty(false)} disabled={actionBusy} className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">×</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {isStaff && !showPenalty && (match.penalties || []).length === 0 && (
+        <div className="mb-6">
+          <button data-testid="open-penalty" onClick={() => setShowPenalty(true)} className="kop-chamfer border border-red-900/60 text-red-400 hover:text-red-300 text-xs font-display uppercase tracking-widest px-3 py-2">
+            <Gavel className="w-3 h-3 inline mr-1" /> Aplicar penalidade à equipe
+          </button>
+        </div>
+      )}
+
+      {isAdmin && !match.wo && !match.locked && elims.length === 0 && (
+        <div className="mb-6 bg-black/50 border border-amber-600/40 kop-chamfer p-3">
+          <div className="text-[10px] font-display uppercase tracking-widest text-amber-300 mb-2">W.O. — registrar ausência (5 × 0 administrativo)</div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => setConfirmWo(match.team_a)} disabled={actionBusy} className="kop-chamfer border border-amber-500 text-amber-300 text-xs px-3 py-1.5 uppercase font-display tracking-widest disabled:opacity-50">
+              W.O. a favor de {teamA?.name}
+            </button>
+            <button onClick={() => setConfirmWo(match.team_b)} disabled={actionBusy} className="kop-chamfer border border-amber-500 text-amber-300 text-xs px-3 py-1.5 uppercase font-display tracking-widest disabled:opacity-50">
+              W.O. a favor de {teamB?.name}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmWo && (
+        <div className="mb-4 bg-black/80 border border-amber-500 kop-chamfer p-3 flex flex-wrap items-center gap-3">
+          <AlertTriangle className="w-4 h-4 text-amber-400" />
+          <span className="text-sm text-amber-300 font-display uppercase tracking-widest">
+            Confirmar W.O. a favor de {teams.find(t => t.id === confirmWo)?.name}?
+          </span>
+          <button onClick={() => submitWo(confirmWo)} disabled={actionBusy} className="kop-chamfer bg-amber-500 hover:bg-amber-400 text-black font-arcade uppercase tracking-widest px-3 py-2">Confirmar</button>
+          <button onClick={() => setConfirmWo(null)} disabled={actionBusy} className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">Cancelar</button>
+        </div>
+      )}
+
+      {isStaff && (running || paused) && (
+        <div className="mb-6 flex flex-wrap gap-2">
+          <button onClick={declareDraw} disabled={actionBusy} className="kop-chamfer border border-cyan-500 text-cyan-300 text-xs font-display uppercase tracking-widest px-3 py-2 disabled:opacity-50">
+            Declarar empate (eliminação simultânea)
+          </button>
+        </div>
+      )}
+
+      {isAdmin && finished && (
+        <div className="mb-6">
+          {showRedo ? (
+            <div className="bg-black/80 border-2 border-amber-500/70 kop-chamfer p-3 flex flex-wrap items-center gap-2">
+              <span className="text-sm text-amber-300 font-display uppercase tracking-widest">
+                Refazer esta partida? O resultado atual será arquivado no histórico.
+              </span>
+              <input value={redoReason} onChange={e => setRedoReason(e.target.value)} placeholder="Motivo (opcional)"
+                className="bg-slate-900 border border-slate-700 px-3 py-1.5 text-white text-sm outline-none" />
+              <button onClick={redoMatch} disabled={actionBusy} className="kop-chamfer bg-amber-500 hover:bg-amber-400 text-black font-arcade uppercase tracking-widest px-3 py-2 disabled:opacity-50">
+                <RotateCcw className="w-3 h-3 inline mr-1" /> Confirmar
+              </button>
+              <button onClick={() => setShowRedo(false)} disabled={actionBusy} className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">Cancelar</button>
+            </div>
+          ) : (
+            <button onClick={() => setShowRedo(true)} disabled={actionBusy} className="kop-chamfer border border-amber-700 text-amber-500 hover:text-amber-300 text-xs font-display uppercase tracking-widest px-3 py-2 disabled:opacity-50">
+              <RotateCcw className="w-3 h-3 inline mr-1" /> Refazer partida
+            </button>
+          )}
         </div>
       )}
 
@@ -341,18 +575,26 @@ export default function MatchDetail() {
             <>
               <div className="font-arcade text-4xl sm:text-6xl text-cyan-300 uppercase animate-kop-pulse">DRAW</div>
               <div className="mt-2 font-arcade text-2xl text-white">{teamA?.name} <span className="text-slate-500">·</span> {teamB?.name}</div>
-              <div className="mt-3 font-mono-num text-xl text-slate-400">0 · 0 pts</div>
+              <div className="mt-3 font-mono-num text-xl text-slate-400">{match.points_a} · {match.points_b} pts</div>
+              {match.draw_reason && <div className="mt-1 text-[10px] uppercase font-display tracking-widest text-slate-500">Empate: {match.draw_reason}</div>}
             </>
           ) : (
             <>
               <div className="font-arcade text-4xl sm:text-6xl text-yellow-400 uppercase animate-kop-pulse">WINNER</div>
               <div className="font-arcade text-3xl text-white uppercase mt-2">{winnerTeam?.name}</div>
-              <div className="mt-3 font-mono-num text-2xl text-cyan-300">{match.points_a} · {match.points_b} pts</div>
+              <div className="mt-3 font-mono-num text-2xl text-cyan-300">
+                {match.wo ? "5 × 0 — W.O." : `${match.points_a} · ${match.points_b} pts`}
+              </div>
             </>
           )}
           {(match.perfect_a || match.perfect_b) && (
             <div className="mt-3 inline-block bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-black font-arcade tracking-widest px-4 py-1 kop-glow-gold animate-pulse">
               PERFECT! {winnerTeam?.players?.length || 0}/{winnerTeam?.players?.length || 0} PLAYERS ALIVE
+            </div>
+          )}
+          {(match.admin_perfect_a || match.admin_perfect_b) && (
+            <div className="mt-3 text-[10px] uppercase font-display tracking-widest text-amber-400">
+              PERFECT administrativo (W.O.) — não conta para desempate
             </div>
           )}
           {isAdmin && !match.locked && match.phase !== "GROUP" && match.is_draw && (
@@ -381,7 +623,7 @@ export default function MatchDetail() {
               textShadow: "0 0 60px rgba(234,179,8,0.9)",
             }}>PERFECT!</div>
             <div className="mt-4 font-arcade text-3xl sm:text-5xl text-white uppercase">{winnerTeam.name}</div>
-            <div className="mt-2 text-cyan-300 font-display uppercase tracking-widest">{winnerTeam?.players?.length || 0}/{winnerTeam?.players?.length || 0} PLAYERS ALIVE · +2 BONUS</div>
+            <div className="mt-2 text-cyan-300 font-display uppercase tracking-widest">{winnerTeam?.players?.length || 0}/{winnerTeam?.players?.length || 0} PLAYERS ALIVE</div>
             <div className="mt-6 flex gap-3 justify-center">
               {(winnerTeam.players || []).map(pid => byId[pid] && (
                 <PlayerCard key={pid} player={byId[pid]} size="md" />

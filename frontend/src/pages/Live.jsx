@@ -99,6 +99,7 @@ function StandingsView({ teams }) {
       <td className="p-3 text-right font-mono-num text-cyan-300 text-xl">{r.draws}</td>
       <td className="p-3 text-right font-mono-num text-red-400 text-xl">{r.losses}</td>
       <td className={`p-3 text-right font-mono-num text-xl ${r.diff > 0 ? "text-green-400" : r.diff < 0 ? "text-red-400" : "text-slate-400"}`}>{r.diff > 0 ? "+" : ""}{r.diff}</td>
+      <td className="p-3 text-right font-mono-num text-amber-400 text-xl">{r.perfects || 0}</td>
       <td className="p-3 text-right font-arcade text-yellow-400 text-3xl">{r.points}</td>
     </tr>
   );
@@ -107,7 +108,7 @@ function StandingsView({ teams }) {
       <div className={`font-arcade text-3xl ${color} uppercase mb-2 tracking-widest`}>Grupo {name}</div>
       <table className="w-full border border-slate-800 kop-chamfer overflow-hidden">
         <thead className="bg-black/80 text-slate-500 uppercase text-xs">
-          <tr><th className="p-2 text-left">POS</th><th className="p-2 text-left">Equipe</th><th className="p-2 text-right">J</th><th className="p-2 text-right">V</th><th className="p-2 text-right">E</th><th className="p-2 text-right">D</th><th className="p-2 text-right">SAL</th><th className="p-2 text-right">PTS</th></tr>
+          <tr><th className="p-2 text-left">POS</th><th className="p-2 text-left">Equipe</th><th className="p-2 text-right">J</th><th className="p-2 text-right">V</th><th className="p-2 text-right">E</th><th className="p-2 text-right">D</th><th className="p-2 text-right">SAL</th><th className="p-2 text-right">PF</th><th className="p-2 text-right">PTS</th></tr>
         </thead>
         <tbody>{items.map((r, i) => <Row key={r.team_id} r={r} i={i} color={color} qualified={i < groupQpg} />)}</tbody>
       </table>
@@ -118,7 +119,7 @@ function StandingsView({ teams }) {
       <div className="text-center mb-6">
         <div className="font-arcade text-red-500 text-sm sm:text-lg tracking-[0.5em] uppercase animate-kop-flicker">KOP 3x3 — LIVE STANDINGS</div>
         <div className="font-arcade text-4xl sm:text-6xl text-white uppercase tracking-widest mt-1">CLASSIFICAÇÃO</div>
-        <div className="font-display text-xs sm:text-sm text-cyan-300 uppercase tracking-widest">Pts = 3 vitória + 2 bônus wipe · Empate/Derrota = 0</div>
+        <div className="font-display text-xs sm:text-sm text-cyan-300 uppercase tracking-widest">Pts = 1 por eliminação + 2 de bônus · Empate mantém os pontos das eliminações</div>
       </div>
       <div className="flex flex-col lg:flex-row flex-wrap gap-6">
         {Object.keys(rows).sort().map((name, idx) => (
@@ -404,7 +405,7 @@ export default function Live() {
         {finished && (
           <div className="mt-6 text-center">
             {featured.is_draw ? (
-              <div className="font-arcade text-3xl sm:text-5xl text-cyan-300 uppercase animate-kop-pulse">DRAW · 0 × 0 PTS</div>
+              <div className="font-arcade text-3xl sm:text-5xl text-cyan-300 uppercase animate-kop-pulse">DRAW · {featured.points_a} × {featured.points_b} PTS</div>
             ) : (
               <div className="font-arcade text-3xl sm:text-5xl text-yellow-400 uppercase animate-kop-pulse">WINNER: {winnerName}</div>
             )}

@@ -12,6 +12,8 @@ export default function Standings() {
   }, []);
 
   const groups = Object.keys(s).sort();
+  const pendingTiebreak = Object.values(s).some(rows =>
+    (rows || []).some(r => r.tiebreak_pending));
 
   const Table = ({ rows, name, color }) => (
     <div className="mb-8">
@@ -28,6 +30,7 @@ export default function Standings() {
               <th className="p-2 text-right">D</th>
               <th className="p-2 text-right">ELIMS</th>
               <th className="p-2 text-right">SAL</th>
+              <th className="p-2 text-right">PF</th>
               <th className="p-2 text-right">Pts</th>
             </tr>
           </thead>
@@ -42,6 +45,7 @@ export default function Standings() {
                 <td className="p-2 text-right font-mono-num text-red-400">{r.losses}</td>
                 <td className="p-2 text-right font-mono-num text-cyan-300">{r.elims_for}/{r.elims_against}</td>
                 <td className={`p-2 text-right font-mono-num ${r.diff > 0 ? "text-green-400" : r.diff < 0 ? "text-red-400" : "text-slate-400"}`}>{r.diff > 0 ? "+" : ""}{r.diff}</td>
+                <td className="p-2 text-right font-mono-num text-amber-400">{r.perfects || 0}</td>
                 <td className="p-2 text-right font-arcade text-yellow-400">{r.points}</td>
               </tr>
             ))}
@@ -57,11 +61,16 @@ export default function Standings() {
         <div className="font-display text-cyan-300 text-xs tracking-[0.4em] uppercase">Ranking</div>
         <h1 className="font-arcade text-3xl text-red-500 uppercase">Classificação</h1>
         <div className="text-slate-500 text-xs mt-1 font-display tracking-widest uppercase">
-          Pts = Eliminações realizadas · V = Vitória · E = Empate · D = Derrota · SAL = Saldo
+          Pts = pontos (1 por eliminação + 2 de bônus) · V = vitórias · E = empates · D = derrotas · SAL = saldo de eliminações · PF = PERFECTs
         </div>
         <div className="text-cyan-300/80 text-[10px] mt-1 font-display tracking-widest uppercase">
-          {qpg} classificado(s) por grupo
+          {qpg} classificado(s) por grupo · Desempate: pontos, vitórias, saldo, PERFECTs, confronto direto
         </div>
+        {pendingTiebreak && (
+          <div data-testid="tiebreak-pending" className="text-amber-300/90 text-[10px] mt-1 font-display tracking-widest uppercase">
+            Empate ainda não resolvido após o confronto direto. Critérios 6 e 7 aguardam definição da organização.
+          </div>
+        )}
       </div>
       {groups.length === 0 && (
         <div className="text-slate-500 text-center py-20 font-display uppercase tracking-widest">Aguardando sorteio</div>
