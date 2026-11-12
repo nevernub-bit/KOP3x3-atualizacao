@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { api } from "../api";
+import { api, formatErr } from "../api";
 import { useAuth } from "../auth";
 import { PlayerCard } from "../components/PlayerCard";
 import { toast } from "sonner";
@@ -134,7 +134,8 @@ export default function MatchDetail() {
       return r.data;
     } catch (e) {
       sfx.error();
-      toast.error(e.response?.data?.detail || errorMessage);
+      const detail = e.response?.data?.detail;
+      toast.error(detail ? formatErr(detail) : errorMessage);
       return null;
     } finally {
       actionInFlight.current = false;
@@ -172,7 +173,7 @@ export default function MatchDetail() {
   const toggleLock = () => runMatchMutation(() => api.post(`/matches/${mid}/lock`), "Erro ao alterar bloqueio");
   const submitElim = async () => {
     if (!selEliminated) return toast.error("Selecione o jogador eliminado");
-    const token = `${mid}:${selEliminated}:${Date.now()}`;
+    const token = crypto.randomUUID();
     const result = await runMatchMutation(() => api.post(`/matches/${mid}/eliminate`, {
       eliminated_id: selEliminated, client_token: token,
     }));
@@ -181,7 +182,7 @@ export default function MatchDetail() {
   const quickEliminate = async () => {
     if (!quickTarget) return;
     const target = quickTarget;
-    const token = `${mid}:${target.id}:${Date.now()}`;
+    const token = crypto.randomUUID();
     const result = await runMatchMutation(() => api.post(`/matches/${mid}/eliminate`, {
       eliminated_id: target.id, client_token: token,
     }));
@@ -190,7 +191,7 @@ export default function MatchDetail() {
   const quickUndeclared = async () => {
     if (!quickTarget) return;
     const target = quickTarget;
-    const token = `${mid}:${target.id}:und:${Date.now()}`;
+    const token = crypto.randomUUID();
     const result = await runMatchMutation(() => api.post(`/matches/${mid}/undeclared`, {
       player_id: target.id, reason: "Eliminação não declarada", client_token: token,
     }), "Erro ao registrar eliminação não declarada");
