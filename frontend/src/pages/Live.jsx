@@ -180,6 +180,7 @@ export default function Live() {
   const [liveState, setLiveState] = useState({ mode: "MATCH", match_id: null });
   const [overlay, setOverlay] = useState(null);
   const lastElimsRef = useRef({}); const lastStatusRef = useRef({}); const lastCdRef = useRef({});
+  const lastPenRef = useRef({});
   const byIdRef = useRef({});
   const inFlightRef = useRef(false);
   const aliveRef = useRef(true);
@@ -282,6 +283,24 @@ export default function Live() {
     }
     lastElimsRef.current[key] = cur;
 
+    // Penalidades: o selo no placar é permanente, o aviso é só para uma
+    // ocorrência nova (a primeira leitura de uma partida não dispara aviso).
+    const activePens = (featured.penalties || [])
+      .filter(p => (p.status || "ATIVA") !== "REVERTIDA");
+    const seenPens = lastPenRef.current[key];
+    if (seenPens === undefined) {
+      lastPenRef.current[key] = new Set(activePens.map(p => p.id));
+    } else {
+      const freshPens = activePens.filter(p => p.id && !seenPens.has(p.id));
+      freshPens.forEach(p => seenPens.add(p.id));
+      if (freshPens.length) {
+        const pen = freshPens[freshPens.length - 1];
+        const teamName = teams.find(t => t.id === pen.team_id)?.name;
+        sfx.penalty();
+        flashOverlay({ type: "PENALTY", penalty: pen, teamName }, 4500);
+      }
+    }
+
     const prevStatus = lastStatusRef.current[key];
     if (prevStatus && prevStatus !== featured.status) {
       if (featured.status === "EM_ANDAMENTO") { sfx.fight(); flashOverlay({ type: "FIGHT" }, 1500); }
@@ -292,7 +311,7 @@ export default function Live() {
       }
     }
     lastStatusRef.current[key] = featured.status;
-  }, [featured, flashOverlay]);
+  }, [featured, flashOverlay, teams]);
 
   const rosterIds = useMemo(() => {
     if (!featured) return [];
@@ -350,6 +369,8 @@ export default function Live() {
   const aliveA = rosterA.filter(p => !eliminatedIds.has(p.id)).length;
   const aliveB = rosterB.filter(p => !eliminatedIds.has(p.id)).length;
   const finished = featured.status === "ENCERRADA";
+  const penA = featured.penalty_points_a || 0;
+  const penB = featured.penalty_points_b || 0;
   const winnerName = teams.find(t => t.id === featured.winner_team_id)?.name;
 
   return (
@@ -389,16 +410,38 @@ export default function Live() {
         <div className="w-full max-w-6xl mt-6 grid grid-cols-[1fr,auto,1fr] gap-3 sm:gap-8 items-center">
           <div className="text-center">
             <div className={`font-mono-num text-3xl sm:text-5xl font-black ${finished && featured.winner_team_id === featured.team_a ? "text-yellow-400" : "text-white"} mb-1`}>{featured.elims_a}</div>
-            {finished && <div className="font-arcade text-xl text-cyan-300">{featured.points_a} PTS</div>}
             <div className="text-[10px] font-display tracking-widest uppercase text-slate-500 mb-2">Eliminações</div>
-            <div className="flex justify-center gap-2 flex-wrap">{rosterA.map(p => <PlayerCard key={p.id} player={p} size="md" eliminated={eliminatedIds.has(p.id)} showLevel={false} />)}</div>
+            {penA > 0 ? (
+              <>
+                <div data-testid="live-penalty-a" className="inline-flex items-center gap-1 border-2 border-red-500 bg-red-950/70 text-red-300 font-arcade text-[10px] sm:text-sm uppercase tracking-widest px-2 py-1 kop-chamfer">
+                  ⚠ −{penA} PENALIDADE
+                </div>
+                <div data-testid="live-points-a" className="mt-1 font-arcade text-lg sm:text-2xl text-yellow-300">
+                  {featured.points_a} {featured.points_a === 1 ? "PONTO" : "PONTOS"}
+                </div>
+              </>
+            ) : (
+              finished && <div className="font-arcade text-xl text-cyan-300">{featured.points_a} PTS</div>
+            )}
+            <div className="mt-2 flex justify-center gap-2 flex-wrap">{rosterA.map(p => <PlayerCard key={p.id} player={p} size="md" eliminated={eliminatedIds.has(p.id)} showLevel={false} />)}</div>
           </div>
           <div className="font-arcade text-4xl sm:text-7xl text-white animate-kop-slam" style={{ textShadow: "0 0 40px rgba(255,46,76,1)" }}>VS</div>
           <div className="text-center">
             <div className={`font-mono-num text-3xl sm:text-5xl font-black ${finished && featured.winner_team_id === featured.team_b ? "text-yellow-400" : "text-white"} mb-1`}>{featured.elims_b}</div>
-            {finished && <div className="font-arcade text-xl text-cyan-300">{featured.points_b} PTS</div>}
             <div className="text-[10px] font-display tracking-widest uppercase text-slate-500 mb-2">Eliminações</div>
-            <div className="flex justify-center gap-2 flex-wrap">{rosterB.map(p => <PlayerCard key={p.id} player={p} size="md" eliminated={eliminatedIds.has(p.id)} showLevel={false} />)}</div>
+            {penB > 0 ? (
+              <>
+                <div data-testid="live-penalty-b" className="inline-flex items-center gap-1 border-2 border-red-500 bg-red-950/70 text-red-300 font-arcade text-[10px] sm:text-sm uppercase tracking-widest px-2 py-1 kop-chamfer">
+                  ⚠ −{penB} PENALIDADE
+                </div>
+                <div data-testid="live-points-b" className="mt-1 font-arcade text-lg sm:text-2xl text-yellow-300">
+                  {featured.points_b} {featured.points_b === 1 ? "PONTO" : "PONTOS"}
+                </div>
+              </>
+            ) : (
+              finished && <div className="font-arcade text-xl text-cyan-300">{featured.points_b} PTS</div>
+            )}
+            <div className="mt-2 flex justify-center gap-2 flex-wrap">{rosterB.map(p => <PlayerCard key={p.id} player={p} size="md" eliminated={eliminatedIds.has(p.id)} showLevel={false} />)}</div>
           </div>
         </div>
 
@@ -428,6 +471,21 @@ export default function Live() {
         <div className="fixed inset-x-0 top-1/3 z-50 pointer-events-none flex flex-col items-center animate-kop-slam">
           <div className="font-arcade text-5xl sm:text-7xl text-red-500 uppercase tracking-widest" style={{ textShadow: "0 0 40px rgba(255,46,76,1)" }}>ELIMINATED!</div>
           <div className="font-arcade text-3xl text-white uppercase mt-2">{overlay.victim.name}</div>
+        </div>
+      )}
+      {overlay?.type === "PENALTY" && (
+        <div className="fixed inset-x-0 bottom-0 z-50 pointer-events-none flex justify-center px-4 pb-6">
+          <div data-testid="live-penalty-alert" className="animate-kop-slam border-2 border-red-500 bg-black/95 kop-chamfer kop-glow-red px-6 py-4 text-center max-w-2xl">
+            <div className="font-arcade text-red-500 text-2xl sm:text-4xl uppercase tracking-widest">⚠ PENALIDADE</div>
+            <div className="font-arcade text-white text-xl sm:text-2xl uppercase mt-1">{overlay.teamName || "EQUIPE"}</div>
+            <div className="font-mono-num text-red-300 text-lg sm:text-xl mt-1">
+              −{overlay.penalty.points} {overlay.penalty.points === 1 ? "PONTO" : "PONTOS"}
+            </div>
+            <div className="font-display text-slate-300 uppercase tracking-widest text-xs sm:text-sm mt-1">{overlay.penalty.reason}</div>
+            {overlay.penalty.player_name && (
+              <div className="font-display text-slate-500 uppercase tracking-widest text-[10px] mt-1">JOGADOR: {overlay.penalty.player_name}</div>
+            )}
+          </div>
         </div>
       )}
       {overlay?.type === "FIGHT" && (

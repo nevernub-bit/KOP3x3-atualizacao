@@ -15,6 +15,20 @@ function fmtTime(ms) {
   return `${m}:${s}`;
 }
 
+// Horário local da ocorrência (a partida pode ser consultada dias depois).
+function fmtClock(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+const PENALTY_TYPE_LABELS = {
+  ELIMINACAO_NAO_DECLARADA: "Eliminação não declarada",
+  CONDUTA: "Conduta antidesportiva",
+  OUTRA: "Outra",
+};
+
 export default function MatchDetail() {
   const { mid } = useParams();
   const { isAdmin, isStaff } = useAuth();
@@ -29,8 +43,12 @@ export default function MatchDetail() {
   const [actionBusy, setActionBusy] = useState(false);
   const [quickTarget, setQuickTarget] = useState(null);
   const [penaltyTeam, setPenaltyTeam] = useState("");
+  const [penaltyPlayer, setPenaltyPlayer] = useState("");
   const [penaltyReason, setPenaltyReason] = useState("");
   const [showPenalty, setShowPenalty] = useState(false);
+  const [staffPenalties, setStaffPenalties] = useState(null);
+  const [revertTarget, setRevertTarget] = useState(null);
+  const [revertReason, setRevertReason] = useState("");
   const [confirmWo, setConfirmWo] = useState(null);
   const [showRedo, setShowRedo] = useState(false);
   const [redoReason, setRedoReason] = useState("");
@@ -47,6 +65,17 @@ export default function MatchDetail() {
     setMatch(m.data); setTeams(t.data); setPlayers(p.data);
   };
   useEffect(() => { load().catch(() => toast.error("Não foi possível carregar os dados da partida")); }, [mid]);
+
+  // Registro oficial com a identidade de quem aplicou/reverteu: só a arbitragem
+  // recebe esse endpoint; visitantes usam o recorte público da partida.
+  useEffect(() => {
+    if (!isStaff) { setStaffPenalties(null); return; }
+    let cancelled = false;
+    api.get(`/matches/${mid}/penalties`)
+      .then(r => { if (!cancelled) setStaffPenalties(r.data?.penalties || []); })
+      .catch(() => { if (!cancelled) setStaffPenalties(null); });
+    return () => { cancelled = true; };
+  }, [mid, isStaff, match?.revision, match?.penalties?.length]);
 
   useEffect(() => {
     if (!match) return;
@@ -113,6 +142,11 @@ export default function MatchDetail() {
   const aliveA = rosterA.filter(p => !isEliminated(p.id));
   const aliveB = rosterB.filter(p => !isEliminated(p.id));
   const elimEntry = Object.fromEntries(elims.map(e => [e.eliminated_id, e]));
+  const penalties = match.penalties || [];
+  const penA = match.penalty_points_a || 0;
+  const penB = match.penalty_points_b || 0;
+  const actorById = Object.fromEntries((staffPenalties || [])
+    .filter(p => p.by).map(p => [p.id, p.by]));
 
   const eliminatedOptions = [...aliveA, ...aliveB];
   const finished = match.status === "ENCERRADA";
@@ -211,10 +245,25 @@ export default function MatchDetail() {
     if (penaltyReason.trim().length < 3) return toast.error("Informe o motivo da penalidade");
     const result = await runMatchMutation(() => api.post(`/matches/${mid}/penalty`, {
       team_id: penaltyTeam, points: 1, reason: penaltyReason.trim(),
+      player_id: penaltyPlayer || null,
+      client_token: crypto.randomUUID(),
     }), "Erro ao aplicar penalidade");
-    if (result) { setShowPenalty(false); setPenaltyReason(""); setPenaltyTeam(""); toast.success("Penalidade registrada"); }
+    if (result) {
+      setShowPenalty(false); setPenaltyReason(""); setPenaltyTeam(""); setPenaltyPlayer("");
+      toast.success("Penalidade registrada");
+    }
   };
-  const removePenalty = (pid) => runMatchMutation(() => api.delete(`/matches/${mid}/penalty/${pid}`), "Erro ao remover penalidade");
+  // Correção administrativa: o registro NÃO é apagado — fica como REVERTIDA.
+  const revertPenalty = async (pen) => {
+    if (revertReason.trim().length < 3) return toast.error("Informe o motivo da correção");
+    const result = await runMatchMutation(() => api.post(`/matches/${mid}/penalty/${pen.id}/revert`, {
+      reason: revertReason.trim(),
+    }), "Erro ao reverter penalidade");
+    if (result) {
+      setRevertTarget(null); setRevertReason("");
+      toast.success("Penalidade revertida — registro mantido no histórico");
+    }
+  };
   const declareDraw = () => runMatchMutation(() => api.post(`/matches/${mid}/declare-draw`, {
     simultaneous: true, reason: "Eliminação simultânea",
   }), "Erro ao declarar empate");
@@ -313,9 +362,10 @@ export default function MatchDetail() {
                 {match.wo && <span className="text-amber-400"> · W.O.</span>}
               </div>
             )}
-            {((match.penalty_points_a || 0) > 0 || (match.penalty_points_b || 0) > 0) && (
-              <div className="mt-1 text-[10px] font-display uppercase tracking-widest text-red-400">
-                Penalidades: −{match.penalty_points_a || 0} / −{match.penalty_points_b || 0}
+            {(penA > 0 || penB > 0) && (
+              <div data-testid="match-points-breakdown" className="mt-1 space-y-0.5 text-[10px] font-display uppercase tracking-widest text-red-400">
+                <div>{teamA?.name}: {match.elims_a} elim · −{penA} pen · <span className="text-white">{match.points_a} pts</span></div>
+                <div>{teamB?.name}: {match.elims_b} elim · −{penB} pen · <span className="text-white">{match.points_b} pts</span></div>
               </div>
             )}
           </div>
@@ -463,37 +513,86 @@ export default function MatchDetail() {
         </div>
       )}
 
-      {(showPenalty || (match.penalties || []).length > 0) && (
+      {(showPenalty || penalties.length > 0) && (
         <div data-testid="penalty-panel" className="bg-black/60 border-2 border-red-900/60 kop-chamfer p-4 mb-6">
           <div className="flex items-center gap-2 mb-3">
             <Gavel className="w-4 h-4 text-red-400" />
-            <div className="font-arcade text-red-400 uppercase text-sm tracking-widest">Penalidades</div>
+            <div className="font-arcade text-red-400 uppercase text-sm tracking-widest">Eventos · Penalidades · Histórico</div>
             {isStaff && !showPenalty && (
               <button onClick={() => setShowPenalty(true)} className="ml-auto text-xs font-display uppercase tracking-widest text-red-300 hover:text-red-200">+ Aplicar</button>
             )}
           </div>
-          {(match.penalties || []).length > 0 && (
-            <ul className="space-y-1 text-xs mb-3">
-              {match.penalties.map(p => (
-                <li key={p.id} className="flex flex-wrap items-center gap-2 text-slate-300">
-                  <span className="font-mono-num text-red-400">−{p.points}</span>
-                  <span className="font-display uppercase">{teams.find(t => t.id === p.team_id)?.name}</span>
-                  <span className="text-slate-400">{p.reason}</span>
-                  <span className="text-slate-600">· {p.match_status} · {p.by}</span>
-                  {isAdmin && (
-                    <button onClick={() => removePenalty(p.id)} disabled={actionBusy} className="ml-auto text-slate-500 hover:text-red-400 disabled:opacity-50" title="Remover penalidade">×</button>
-                  )}
-                </li>
-              ))}
+          {penalties.length > 0 && (
+            <ul className="space-y-2 mb-3">
+              {penalties.map(p => {
+                const reverted = (p.status || "ATIVA") === "REVERTIDA";
+                const teamName = p.team_name || teams.find(t => t.id === p.team_id)?.name || "—";
+                const playerName = p.player_name || p.player_id || "— (equipe)";
+                return (
+                  <li key={p.id} data-testid={`penalty-entry-${p.id}`}
+                    className={`border kop-chamfer p-3 text-xs ${reverted ? "border-slate-700 bg-slate-900/40" : "border-red-800/70 bg-red-950/20"}`}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`font-arcade uppercase tracking-widest ${reverted ? "text-slate-400" : "text-red-400"}`}>
+                        {reverted ? "↺ Penalidade revertida" : "⚠ Penalidade"}
+                      </span>
+                      <span className="font-mono-num text-red-300">−{p.points} {p.points === 1 ? "ponto" : "pontos"}</span>
+                      <span className="ml-auto font-mono-num text-slate-500">{fmtClock(p.at)}</span>
+                    </div>
+                    <div className="mt-2 grid sm:grid-cols-2 gap-x-4 gap-y-1 text-slate-300">
+                      <div>Jogador: <span className={reverted ? "text-slate-400" : "text-white"}>{playerName}</span></div>
+                      <div>Equipe: <span className="font-display uppercase">{teamName}</span></div>
+                      <div className="sm:col-span-2">
+                        Motivo: <span className="text-slate-200">{p.reason}</span>
+                        <span className="text-slate-500"> · {PENALTY_TYPE_LABELS[p.type] || p.type}</span>
+                      </div>
+                      <div>Pontuação: <span className="font-mono-num text-white">{p.points_before ?? "—"} → {p.points_after ?? "—"}</span>
+                        {p.points_before != null && p.points_before === p.points_after && <span className="text-slate-500"> (piso zero)</span>}
+                      </div>
+                      <div>Aplicada por: <span className="text-slate-200">{actorById[p.id] || "—"}</span></div>
+                    </div>
+                    {reverted && (
+                      <div className="mt-2 text-[10px] uppercase tracking-widest text-slate-500">
+                        Revertida em {fmtClock(p.reverted_at)}{p.revert_reason ? ` · ${p.revert_reason}` : ""} — registro preservado
+                      </div>
+                    )}
+                    {!reverted && isAdmin && (revertTarget === p.id ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <input value={revertReason} onChange={e => setRevertReason(e.target.value)}
+                          placeholder="Motivo da correção (obrigatório)"
+                          className="flex-1 min-w-[180px] bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1.5 text-white text-xs outline-none" />
+                        <button onClick={() => revertPenalty(p)} disabled={actionBusy}
+                          className="kop-chamfer border border-red-500 text-red-300 px-3 py-1.5 text-[10px] uppercase font-display tracking-widest disabled:opacity-50">
+                          Confirmar reversão
+                        </button>
+                        <button onClick={() => { setRevertTarget(null); setRevertReason(""); }}
+                          className="text-slate-500 hover:text-white text-[10px] uppercase">Cancelar</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setRevertTarget(p.id); setRevertReason(""); }} disabled={actionBusy}
+                        className="mt-2 text-[10px] font-display uppercase tracking-widest text-slate-500 hover:text-red-400 disabled:opacity-50">
+                        Reverter penalidade (mantém o registro)
+                      </button>
+                    ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
           {showPenalty && isStaff && (
-            <div className="grid sm:grid-cols-[auto,1fr,auto] gap-2 items-end">
-              <select value={penaltyTeam} onChange={e => setPenaltyTeam(e.target.value)}
+            <div className="grid sm:grid-cols-[auto,auto,1fr,auto] gap-2 items-end">
+              <select value={penaltyTeam} onChange={e => { setPenaltyTeam(e.target.value); setPenaltyPlayer(""); }}
                 className="bg-slate-900 border border-slate-700 px-2 py-2 text-white text-sm outline-none">
                 <option value="">Equipe</option>
                 <option value={match.team_a}>{teamA?.name}</option>
                 <option value={match.team_b}>{teamB?.name}</option>
+              </select>
+              <select value={penaltyPlayer} onChange={e => setPenaltyPlayer(e.target.value)}
+                disabled={!penaltyTeam}
+                className="bg-slate-900 border border-slate-700 px-2 py-2 text-white text-sm outline-none disabled:opacity-50">
+                <option value="">Equipe (sem jogador)</option>
+                {(penaltyTeam === match.team_a ? rosterA : penaltyTeam === match.team_b ? rosterB : []).map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
               </select>
               <input value={penaltyReason} onChange={e => setPenaltyReason(e.target.value)}
                 placeholder="Motivo da penalidade (obrigatório)"
@@ -507,7 +606,7 @@ export default function MatchDetail() {
         </div>
       )}
 
-      {isStaff && !showPenalty && (match.penalties || []).length === 0 && (
+      {isStaff && !showPenalty && penalties.length === 0 && (
         <div className="mb-6">
           <button data-testid="open-penalty" onClick={() => setShowPenalty(true)} className="kop-chamfer border border-red-900/60 text-red-400 hover:text-red-300 text-xs font-display uppercase tracking-widest px-3 py-2">
             <Gavel className="w-3 h-3 inline mr-1" /> Aplicar penalidade à equipe

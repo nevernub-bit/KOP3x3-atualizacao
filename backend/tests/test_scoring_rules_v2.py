@@ -298,3 +298,12 @@ def test_undo_restores_winner_and_loser_points():
     assert before["points_b"] == 1
     assert after["elims_b"] == 1 and after["points_b"] == 1
     assert after["points_a"] == 2
+
+
+def test_reverted_penalty_keeps_record_but_stops_discounting():
+    pen = [{"team_id": "A", "points": 1, "reason": "corrigida",
+            "status": "REVERTIDA"},
+           {"team_id": "A", "points": 1, "reason": "ativa", "status": "ATIVA"}]
+    r = calc(["b1", "b2", "b3"], penalties=pen)
+    assert r["penalty_points_a"] == 1
+    assert r["points_a"] == 4  # 5 base - 1 active penalty only

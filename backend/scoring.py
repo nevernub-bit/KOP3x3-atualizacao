@@ -52,6 +52,10 @@ def _sum_penalties(match: dict, team_id: Optional[str]) -> int:
     for pen in match.get("penalties") or []:
         if (pen or {}).get("team_id") != team_id:
             continue
+        # A reverted penalty is kept in the official record but no longer
+        # discounts points. Entries without a status are legacy and count.
+        if (pen or {}).get("status") == "REVERTIDA":
+            continue
         try:
             total += int(pen.get("points") or 0)
         except (TypeError, ValueError):

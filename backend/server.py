@@ -227,7 +227,8 @@ def public_player(doc):
 
 
 MATCH_PRIVATE_KEYS = {"audit_log"}
-ACTOR_PRIVATE_KEYS = {"by", "by_role", "user_id", "user_email", "client_token"}
+ACTOR_PRIVATE_KEYS = {"by", "by_role", "user_id", "user_email", "client_token",
+                     "reverted_by"}
 
 
 def public_match(doc):
@@ -343,8 +344,15 @@ class PenaltyIn(BaseModel):
     points: int = Field(1, ge=1, le=3)
     reason: str = Field(..., min_length=3, max_length=300)
     type: Literal["ELIMINACAO_NAO_DECLARADA", "CONDUTA", "OUTRA"] = "ELIMINACAO_NAO_DECLARADA"
+    # Optional: attributes the penalty to a specific player of that team.
+    player_id: Optional[str] = None
     expected_revision: Optional[int] = None
     client_token: Optional[str] = Field(None, max_length=80)
+
+
+class PenaltyRevertIn(BaseModel):
+    """Administrative correction: the record is kept, the discount is undone."""
+    reason: Optional[str] = Field(None, max_length=300)
 
 
 class WoIn(BaseModel):
@@ -1598,6 +1606,35 @@ async def _push_audit(mid: str, entry: dict):
     await db.matches.update_one({"id": mid}, {"$push": {"audit_log": entry}})
 
 
+async def _penalty_snapshot(m: dict, team_id: str, player_id: Optional[str]):
+    """Team name and player name frozen at the moment of the penalty."""
+    ta, tb = await _teams_for_match(m)
+    team = ta if team_id == m.get("team_a") else tb
+    player_name = None
+    if player_id:
+        player = await db.players.find_one({"id": player_id}) or {}
+        player_name = player.get("name")
+    return team, player_name
+
+
+async def _stamp_penalty_points(mid: str, penalty_id: str, team_is_a: bool,
+                               before_net, before_base, r: dict):
+    """Freeze the before/after points on the penalty record.
+
+    The penalty entry is pushed first and the numbers come from the recompute,
+    so the snapshot is written on the same entry right after it.
+    """
+    suffix = "a" if team_is_a else "b"
+    await db.matches.update_one(
+        {"id": mid, "penalties.id": penalty_id},
+        {"$set": {
+            "penalties.$.points_before": before_net,
+            "penalties.$.base_points_before": before_base,
+            "penalties.$.points_after": r.get(f"points_{suffix}"),
+            "penalties.$.base_points_after": r.get(f"base_points_{suffix}"),
+        }})
+
+
 async def _recompute_match(mid: str, extra: Optional[dict] = None,
                           auto_end: bool = False):
     """Recompute every derived field with optimistic concurrency.
@@ -2160,8 +2197,10 @@ async def declare_draw(mid: str, body: DeclareDrawIn, user=Depends(require_staff
 async def add_penalty(mid: str, body: PenaltyIn, user=Depends(require_staff)):
     """Apply a team penalty (-N points) during or after the match.
 
-    The reason is mandatory and the audit trail stores the actor, the match
-    status at the time and the points before/after the penalty.
+    Every application writes an official record on the match: who was penalized
+    (team and, when given, player), reason/type, points before/after, when it
+    happened and which staff member applied it. The record survives the end of
+    the match and is never silently deleted — corrections mark it REVERTIDA.
     """
     m = await _get_match_doc(mid)
     if m.get("locked"):
@@ -2171,12 +2210,25 @@ async def add_penalty(mid: str, body: PenaltyIn, user=Depends(require_staff)):
     if body.client_token and any(
             p.get("client_token") == body.client_token for p in m.get("penalties", [])):
         return await get_match(mid)  # retry of an already applied penalty
+    team, player_name = await _penalty_snapshot(m, body.team_id, body.player_id)
+    if body.player_id:
+        if body.player_id not in set(team.get("players") or []):
+            raise HTTPException(400, "Jogador não pertence à equipe penalizada")
+        if not player_name:
+            raise HTTPException(400, "Jogador não encontrado")
+    is_a = body.team_id == m["team_a"]
     entry = {
-        "id": str(uuid.uuid4()), "team_id": body.team_id,
+        "id": str(uuid.uuid4()),
+        "match_id": mid, "match_number": m.get("number"),
+        "player_id": body.player_id, "player_name": player_name,
+        "team_id": body.team_id, "team_name": team.get("name"),
         "points": int(body.points), "reason": body.reason.strip(),
         "type": body.type, "at": now_iso(), "client_token": body.client_token,
         "by": user.get("email"), "by_role": user.get("role"),
-        "match_status": m.get("status"),
+        "match_status": m.get("status"), "status": "ATIVA",
+        "points_before": m.get("points_a") if is_a else m.get("points_b"),
+        "base_points_before": m.get("base_points_a") if is_a else m.get("base_points_b"),
+        "points_after": None, "base_points_after": None,
     }
     query = {"id": mid, "locked": {"$ne": True}}
     if body.expected_revision is not None:
@@ -2192,13 +2244,16 @@ async def add_penalty(mid: str, body: PenaltyIn, user=Depends(require_staff)):
                 for p in fresh.get("penalties", [])):
             return await get_match(mid)
         raise HTTPException(409, "Partida alterada por outro árbitro. Recarregue e tente novamente.")
-    is_a = body.team_id == m["team_a"]
-    before_points = m.get("points_a") if is_a else m.get("points_b")
+    before_points = entry["points_before"]
     fresh, r = await _recompute_match(mid)
+    await _stamp_penalty_points(mid, entry["id"], is_a,
+                                entry["points_before"], entry["base_points_before"], r)
     after_points = r["points_a"] if is_a else r["points_b"]
     await _push_audit(mid, _audit_entry("PENALTY", user,
         {"points": before_points}, {"points": after_points},
-        {"team_id": body.team_id, "penalty_points": entry["points"],
+        {"penalty_id": entry["id"], "team_id": body.team_id,
+         "team_name": entry["team_name"], "player_id": body.player_id,
+         "player_name": player_name, "penalty_points": entry["points"],
          "reason": entry["reason"], "type": entry["type"],
          "match_status": m.get("status")}))
     return await get_match(mid)
@@ -2242,12 +2297,22 @@ async def undeclared_elimination(mid: str, body: UndeclaredIn,
         "by": user.get("email"), "client_token": body.client_token,
         "undeclared": True,
     }
+    is_offending_a = offending_team == m["team_a"]
+    offending_doc = ta if is_offending_a else tb
+    offender = await db.players.find_one({"id": body.player_id}) or {}
     pen = {
-        "id": str(uuid.uuid4()), "team_id": offending_team, "points": 1,
-        "reason": body.reason.strip(), "type": "ELIMINACAO_NAO_DECLARADA",
+        "id": str(uuid.uuid4()),
+        "match_id": mid, "match_number": m.get("number"),
+        "player_id": body.player_id, "player_name": offender.get("name"),
+        "team_id": offending_team, "team_name": offending_doc.get("name"),
+        "points": 1, "reason": body.reason.strip(),
+        "type": "ELIMINACAO_NAO_DECLARADA",
         "at": now_iso(), "client_token": body.client_token,
         "by": user.get("email"), "by_role": user.get("role"),
-        "match_status": m.get("status"),
+        "match_status": m.get("status"), "status": "ATIVA",
+        "points_before": before["points_a" if is_offending_a else "points_b"],
+        "base_points_before": m.get("base_points_a") if is_offending_a else m.get("base_points_b"),
+        "points_after": None, "base_points_after": None,
     }
     # One atomic write: the elimination and its penalty can never diverge.
     res = await db.matches.update_one(
@@ -2263,34 +2328,84 @@ async def undeclared_elimination(mid: str, body: UndeclaredIn,
         raise HTTPException(409, "Jogador já foi eliminado")
 
     fresh, r = await _recompute_match(mid, auto_end=True)
+    await _stamp_penalty_points(mid, pen["id"], is_offending_a,
+                                pen["points_before"], pen["base_points_before"], r)
     await _push_audit(mid, _audit_entry("UNDECLARED_ELIMINATION", user, before, {
         "points_a": r["points_a"], "points_b": r["points_b"],
         "elims_a": r["elims_a"], "elims_b": r["elims_b"],
         "status": fresh.get("status"),
-    }, {"eliminated_id": body.player_id, "team_id": offending_team,
+    }, {"elimination_id": elim["id"], "penalty_id": pen["id"],
+        "eliminated_id": body.player_id, "player_name": pen["player_name"],
+        "team_id": offending_team, "team_name": pen["team_name"],
         "reason": body.reason, "penalty_points": 1}))
     if fresh.get("status") == "ENCERRADA" and m["status"] != "ENCERRADA":
         await maybe_advance_playoffs()
     return await get_match(mid)
 
 
-@api.delete("/matches/{mid}/penalty/{penalty_id}")
-async def remove_penalty(mid: str, penalty_id: str, user=Depends(require_admin)):
+async def _revert_penalty(mid: str, penalty_id: str, reason: Optional[str], user: dict):
+    """Administrative correction: revert a penalty without deleting it.
+
+    The original record keeps its snapshot and stays in the match history; only
+    its status changes to REVERTIDA, with who/when/why. The discount is removed
+    and the points are recalculated. A silent delete is never performed.
+    """
     m = await _get_match_doc(mid)
     if m.get("locked"):
         raise HTTPException(400, "Partida bloqueada")
     entry = next((p for p in m.get("penalties", []) if p.get("id") == penalty_id), None)
     if not entry:
         raise HTTPException(404, "Penalidade não encontrada")
+    if entry.get("status") == "REVERTIDA":
+        return await get_match(mid)  # idempotent retry
+    reason = (reason or "").strip() or "Correção administrativa"
     is_a = entry["team_id"] == m["team_a"]
     before_points = m.get("points_a") if is_a else m.get("points_b")
-    await db.matches.update_one({"id": mid}, {"$pull": {"penalties": {"id": penalty_id}}})
+    res = await db.matches.update_one(
+        {"id": mid, "locked": {"$ne": True},
+         "penalties": {"$elemMatch": {"id": penalty_id, "status": {"$ne": "REVERTIDA"}}}},
+        {"$set": {
+            "penalties.$.status": "REVERTIDA",
+            "penalties.$.reverted_at": now_iso(),
+            "penalties.$.reverted_by": user.get("email"),
+            "penalties.$.revert_reason": reason,
+        }})
+    if res.matched_count == 0:
+        raise HTTPException(409, "Penalidade já revertida por outro administrador")
     fresh, r = await _recompute_match(mid)
     after_points = r["points_a"] if is_a else r["points_b"]
-    await _push_audit(mid, _audit_entry("REMOVE_PENALTY", user,
+    await _push_audit(mid, _audit_entry("REVERT_PENALTY", user,
         {"points": before_points}, {"points": after_points},
-        {"team_id": entry["team_id"], "reason": entry.get("reason")}))
+        {"penalty_id": penalty_id, "team_id": entry.get("team_id"),
+         "team_name": entry.get("team_name"),
+         "player_id": entry.get("player_id"),
+         "player_name": entry.get("player_name"),
+         "reason": entry.get("reason"), "revert_reason": reason}))
     return await get_match(mid)
+
+
+@api.post("/matches/{mid}/penalty/{penalty_id}/revert")
+async def revert_penalty(mid: str, penalty_id: str,
+                         body: Optional[PenaltyRevertIn] = None,
+                         user=Depends(require_admin)):
+    return await _revert_penalty(mid, penalty_id, body.reason if body else None, user)
+
+
+@api.delete("/matches/{mid}/penalty/{penalty_id}")
+async def revert_penalty_legacy(mid: str, penalty_id: str,
+                                body: Optional[PenaltyRevertIn] = None,
+                                user=Depends(require_admin)):
+    """Kept for compatibility; it also reverts instead of deleting."""
+    return await _revert_penalty(mid, penalty_id, body.reason if body else None, user)
+
+
+@api.get("/matches/{mid}/penalties")
+async def list_match_penalties(mid: str, _=Depends(require_staff)):
+    """Official penalty record of a match, with actor identity (staff only)."""
+    d = await _get_match_doc(mid)
+    penalties = sorted(d.get("penalties", []), key=lambda p: p.get("at") or "")
+    return {"match_id": mid, "match_number": d.get("number"),
+            "penalties": penalties}
 
 
 @api.post("/matches/{mid}/redo")

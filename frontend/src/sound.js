@@ -117,6 +117,11 @@ export const sfx = {
     { f: 784, t: 0.24, d: 0.12 }, { f: 1046, t: 0.36, d: 0.45 },
   ], { volume: 0.24 }),
   draw:     () => play([{ f: 440, t: 0, d: 0.15 }, { f: 440, t: 0.2, d: 0.25, type: "triangle" }], { volume: 0.2 }),
+  // Aviso disciplinar do telão: dois bipes graves, sem fanfarra.
+  penalty:  () => play([
+    { f: 196, t: 0, d: 0.16, type: "sawtooth" },
+    { f: 147, t: 0.2, d: 0.34, type: "sawtooth" },
+  ], { volume: 0.26 }),
   perfect:  () => play([
     { f: 523, t: 0, d: 0.07 }, { f: 659, t: 0.07, d: 0.07 },
     { f: 784, t: 0.14, d: 0.07 }, { f: 1046, t: 0.21, d: 0.07 },

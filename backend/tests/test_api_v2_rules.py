@@ -712,3 +712,196 @@ def test_42_public_payload_never_exposes_tokens_or_auth_data(client):
     assert all("by" not in p and "client_token" not in p for p in pub["penalties"])
     assert "secret-token" not in client.get("/api/matches/msec").text
     assert "admin@example.com" not in client.get("/api/matches/msec").text
+
+
+# ------------------------------------------------ official penalty records
+# Every penalty is an immutable event on the match: it explains the discount
+# (who, team, reason, points before/after, when, which staff member) and stays
+# in the history after the match ends. Corrections mark it REVERTIDA instead of
+# deleting it. Scoring rules themselves are unchanged.
+def seed_penalty_match(mid, number):
+    asyncio.run(server.db.matches.insert_one(make_match(mid, number)))
+
+
+def start_and_score(client, admin, mid, eliminated=("b1", "b2")):
+    assert client.post(f"/api/matches/{mid}/start", headers=admin).status_code == 200
+    for pid in eliminated:
+        r = client.post(f"/api/matches/{mid}/eliminate", headers=admin,
+                        json={"eliminated_id": pid})
+        assert r.status_code == 200, r.text
+    return get(client, mid)
+
+
+def test_38_penalty_record_explains_the_discount(client, admin):
+    seed_penalty_match("penrec1", 201)
+    d = start_and_score(client, admin, "penrec1")
+    assert (d["elims_a"], d["base_points_a"], d["points_a"]) == (2, 2, 2)
+
+    r = client.post("/api/matches/penrec1/penalty", headers=admin, json={
+        "team_id": "ta", "points": 1, "reason": "eliminação não declarada",
+        "type": "ELIMINACAO_NAO_DECLARADA"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    # Eliminations stay the game statistic; only the net result changes.
+    assert (d["elims_a"], d["base_points_a"], d["penalty_points_a"], d["points_a"]) == (2, 2, 1, 1)
+
+    rec = d["penalties"][-1]
+    assert rec["match_id"] == "penrec1" and rec["match_number"] == 201
+    assert (rec["team_id"], rec["team_name"]) == ("ta", "TEAM A")
+    assert rec["reason"] == "eliminação não declarada"
+    assert rec["type"] == "ELIMINACAO_NAO_DECLARADA"
+    assert rec["points"] == 1
+    assert (rec["points_before"], rec["points_after"]) == (2, 1)
+    assert (rec["base_points_before"], rec["base_points_after"]) == (2, 2)
+    assert rec["status"] == "ATIVA"
+    assert rec["match_status"] == "EM_ANDAMENTO"
+    assert rec["at"] and rec["player_id"] is None
+    # The actor is stored but never leaks to the public payload.
+    assert "by" not in rec and "reverted_by" not in rec
+    official = client.get("/api/matches/penrec1/penalties", headers=admin)
+    assert official.status_code == 200, official.text
+    assert official.json()["penalties"][-1]["by"] == server.ADMIN_EMAIL
+
+    # A player of another team cannot be attached to this penalty.
+    bad = client.post("/api/matches/penrec1/penalty", headers=admin, json={
+        "team_id": "tb", "points": 1, "reason": "teste", "player_id": "a1"})
+    assert bad.status_code == 400, bad.text
+
+
+def test_39_undeclared_penalty_records_player_and_snapshot(client, admin):
+    seed_penalty_match("penrec2", 202)
+    start_and_score(client, admin, "penrec2")
+    r = client.post("/api/matches/penrec2/undeclared", headers=admin,
+                    json={"player_id": "a2", "reason": "jogador não se acusou"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert (d["elims_a"], d["elims_b"]) == (2, 1)  # 3 eliminations total
+    assert (d["base_points_a"], d["penalty_points_a"], d["points_a"]) == (2, 1, 1)
+
+    rec = d["penalties"][-1]
+    assert (rec["player_id"], rec["player_name"]) == ("a2", "A2")
+    assert (rec["team_id"], rec["team_name"]) == ("ta", "TEAM A")
+    assert rec["type"] == "ELIMINACAO_NAO_DECLARADA"
+    assert (rec["points_before"], rec["points_after"]) == (2, 1)
+    assert rec["status"] == "ATIVA"
+
+
+def test_40_multiple_penalties_are_recorded_one_by_one(client, admin):
+    seed_penalty_match("penrec3", 203)
+    d = start_and_score(client, admin, "penrec3", eliminated=("b1", "b2", "b3"))
+    assert (d["status"], d["base_points_a"]) == ("ENCERRADA", 5)
+    for reason in ("primeira ocorrência", "segunda ocorrência"):
+        r = client.post("/api/matches/penrec3/penalty", headers=admin, json={
+            "team_id": "ta", "points": 1, "reason": reason})
+        assert r.status_code == 200, r.text
+    d = get(client, "penrec3")
+    assert d["penalty_points_a"] == 2
+    assert d["points_a"] == 3
+    recs = d["penalties"]
+    assert [x["reason"] for x in recs] == ["primeira ocorrência", "segunda ocorrência"]
+    assert [(x["points_before"], x["points_after"]) for x in recs] == [(5, 4), (4, 3)]
+    assert len({x["id"] for x in recs}) == 2
+
+
+def test_41_penalty_survives_match_end_and_reload(client, admin):
+    seed_penalty_match("penrec4", 204)
+    start_and_score(client, admin, "penrec4")
+    r = client.post("/api/matches/penrec4/penalty", headers=admin, json={
+        "team_id": "ta", "points": 1, "reason": "conduta"})
+    pid = r.json()["penalties"][-1]["id"]
+    assert client.post("/api/matches/penrec4/end", headers=admin).status_code == 200
+
+    d = get(client, "penrec4")
+    assert (d["status"], d["points_a"]) == ("ENCERRADA", 1)
+    rec = next(x for x in d["penalties"] if x["id"] == pid)
+    assert rec["status"] == "ATIVA" and rec["match_status"] == "EM_ANDAMENTO"
+    assert (rec["points_before"], rec["points_after"]) == (2, 1)
+
+
+def test_42_reverting_keeps_the_record_and_recalculates(client, admin):
+    seed_penalty_match("penrec5", 205)
+    start_and_score(client, admin, "penrec5")
+    r = client.post("/api/matches/penrec5/penalty", headers=admin, json={
+        "team_id": "ta", "points": 1, "reason": "motivo original"})
+    pid = r.json()["penalties"][-1]["id"]
+    assert r.json()["points_a"] == 1
+
+    r = client.post(f"/api/matches/penrec5/penalty/{pid}/revert", headers=admin,
+                    json={"reason": "lançamento em equipe errada"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["points_a"] == 2  # discount removed
+    rec = next(x for x in d["penalties"] if x["id"] == pid)
+    assert rec["status"] == "REVERTIDA"
+    assert rec["reason"] == "motivo original"  # original record untouched
+    assert rec["revert_reason"] == "lançamento em equipe errada"
+    assert rec["reverted_at"]
+    assert "reverted_by" not in rec
+
+    official = client.get("/api/matches/penrec5/penalties", headers=admin).json()
+    assert official["penalties"][-1]["reverted_by"] == server.ADMIN_EMAIL
+
+    # Retry is idempotent: the entry is never duplicated nor deleted.
+    # (Legacy DELETE keeps working and also only reverts.)
+    again = client.delete(f"/api/matches/penrec5/penalty/{pid}", headers=admin)
+    assert again.status_code == 200, again.text
+    assert len([x for x in again.json()["penalties"] if x["id"] == pid]) == 1
+
+    audit = client.get("/api/matches/penrec5/audit", headers=admin).json()["audit_log"]
+    assert any(a["action"] == "REVERT_PENALTY" and
+               a["detail"]["revert_reason"] == "lançamento em equipe errada"
+               for a in audit)
+
+
+def test_43_only_authorized_staff_reach_the_record(client, admin):
+    seed_penalty_match("penrec6", 206)
+    start_and_score(client, admin, "penrec6", eliminated=())
+    body = {"team_id": "ta", "points": 1, "reason": "teste de permissão"}
+
+    assert client.post("/api/matches/penrec6/penalty", json=body).status_code == 401
+    assert client.delete("/api/matches/penrec6/penalty/x").status_code == 401
+    assert client.get("/api/matches/penrec6/penalties").status_code == 401
+
+    assert client.post("/api/rangers", headers=admin, json={
+        "name": "Ranger Penal", "email": "pen-ranger@example.com",
+        "password": "senha123"}).status_code == 200
+    login = client.post("/api/auth/login", json={
+        "email": "pen-ranger@example.com", "password": "senha123"})
+    ranger = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    applied = client.post("/api/matches/penrec6/penalty", headers=ranger, json=body)
+    assert applied.status_code == 200, applied.text
+    pid = applied.json()["penalties"][-1]["id"]
+    assert client.get("/api/matches/penrec6/penalties",
+                      headers=ranger).status_code == 200
+    assert client.post(f"/api/matches/penrec6/penalty/{pid}/revert",
+                       headers=ranger, json={"reason": "tentativa"}).status_code == 403
+    assert get(client, "penrec6")["points_a"] == 0  # 0 base - 1, floored at zero
+    assert get(client, "penrec6")["penalties"][-1]["status"] == "ATIVA"
+
+
+def test_44_penalty_without_eliminations_is_recorded(client, admin):
+    seed_penalty_match("penrec7", 207)
+    start_and_score(client, admin, "penrec7", eliminated=())
+    r = client.post("/api/matches/penrec7/penalty", headers=admin, json={
+        "team_id": "tb", "points": 1, "reason": "atraso"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert (d["elims_b"], d["base_points_b"], d["penalty_points_b"], d["points_b"]) == (0, 0, 1, 0)
+    rec = d["penalties"][-1]
+    assert (rec["points_before"], rec["points_after"]) == (0, 0)
+    assert rec["status"] == "ATIVA"
+
+
+def test_45_repeated_undeclared_penalty_is_rejected(client, admin):
+    seed_penalty_match("penrec8", 208)
+    start_and_score(client, admin, "penrec8", eliminated=())
+    first = client.post("/api/matches/penrec8/undeclared", headers=admin,
+                        json={"player_id": "b1", "reason": "não declarou"})
+    assert first.status_code == 200, first.text
+    second = client.post("/api/matches/penrec8/undeclared", headers=admin,
+                         json={"player_id": "b1", "reason": "não declarou"})
+    assert second.status_code == 409, second.text
+    d = get(client, "penrec8")
+    assert len(d["penalties"]) == 1
+    assert d["penalty_points_b"] == 1
