@@ -1,6 +1,7 @@
 """KOP 3x3 backend integration tests: v2 scoring (1 pt/elim + 2 bonus), draws keep points, W.O., no eliminator tracking."""
 import os
 import time
+import uuid
 import base64
 import pytest
 import requests
@@ -59,8 +60,8 @@ def get_team_players(tid):
 
 # ---------- 1. Reset ----------
 def test_01_full_reset(admin):
-    # delete existing players
-    for p in requests.get(f"{API}/players").json():
+    # delete existing players (admin sees every status, including PENDENTE)
+    for p in admin.get(f"{API}/players", params={"all_statuses": "true"}).json():
         admin.delete(f"{API}/players/{p['id']}")
     r = admin.post(f"{API}/tournament/reset")
     assert r.status_code == 200
@@ -71,12 +72,22 @@ def test_01_full_reset(admin):
 
 
 # ---------- 2. Register 30 ----------
-def test_02_register_30(public):
+def test_02_register_30(public, admin):
     levels = ["PROFISSIONAL"] * 10 + ["INTERMEDIÁRIO"] * 10 + ["INICIANTE"] * 10
     for i, lvl in enumerate(levels):
+        # Public registration is rate limited per IP (5/hour), so each virtual
+        # client uses its own forwarded address.
+        h = uuid.uuid4().int
         r = public.post(f"{API}/players/register",
-                        json={"name": f"TEST_P{i:02d}", "level": lvl, "photo": PHOTO})
+                        json={"name": f"TEST_P{i:02d}", "level": lvl, "photo": PHOTO},
+                        headers={"X-Forwarded-For": f"10.40.{h % 250}.{(h >> 8) % 250}"})
         assert r.status_code == 200, r.text
+        # Registration is PENDENTE: the organizer must approve it before the
+        # player is public or eligible for the draw.
+        assert r.json()["status"] == "PENDENTE", r.text
+        ap = admin.patch(f"{API}/players/{r.json()['id']}/status",
+                         json={"status": "CONFIRMADO"})
+        assert ap.status_code == 200, ap.text
     assert len(requests.get(f"{API}/players").json()) == 30
 
 

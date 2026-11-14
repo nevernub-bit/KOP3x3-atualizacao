@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, setTestMode } from "./api";
 
 const AuthCtx = createContext(null);
 
@@ -25,6 +25,8 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     localStorage.removeItem("kop_token");
+    // A simulation session never survives an explicit sign-out.
+    setTestMode(false);
     setUser(null);
   };
 

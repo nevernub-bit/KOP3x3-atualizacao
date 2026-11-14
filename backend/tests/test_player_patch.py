@@ -57,16 +57,35 @@ def admin_h():
 def fresh(admin_h):
     r = requests.post(f"{API}/tournament/reset", headers=admin_h)
     assert r.status_code == 200, r.text
-    players = requests.get(f"{API}/players", headers=admin_h).json()
+    players = requests.get(f"{API}/players", params={"all_statuses": "true"},
+                           headers=admin_h).json()
     for p in players:
         requests.delete(f"{API}/players/{p['id']}", headers=admin_h)
-    # Ensure player_limit is at least 30 for draw tests
-    requests.patch(f"{API}/tournament", json={"player_limit": 60}, headers=admin_h)
+    # Capacity comes from the structure (teams × players per team). This suite
+    # registers one player per test, so it needs more than the default 30.
+    requests.patch(f"{API}/tournament", json={
+        "num_teams": 10, "players_per_team": 6,
+        "num_groups": 2, "qualifiers_per_group": 2,
+    }, headers=admin_h)
+    _ADMIN_H.update(admin_h)
     yield
     # cleanup
-    players = requests.get(f"{API}/players", headers=admin_h).json()
+    players = requests.get(f"{API}/players", params={"all_statuses": "true"},
+                           headers=admin_h).json()
     for p in players:
         requests.delete(f"{API}/players/{p['id']}", headers=admin_h)
+
+
+# Admin headers captured by the module fixture so every helper can approve.
+_ADMIN_H: dict = {}
+
+
+def _approve(pid):
+    """Registrations now start as PENDENTE and must be approved to be usable."""
+    r = requests.patch(f"{API}/players/{pid}/status",
+                       json={"status": "CONFIRMADO"}, headers=_ADMIN_H)
+    assert r.status_code == 200, f"approve failed: {r.status_code} {r.text}"
+    return r.json()
 
 
 def _register(name="TEST_P6", nickname="Nick", whatsapp="+55 11 99999-0000",
@@ -82,7 +101,8 @@ def _register(name="TEST_P6", nickname="Nick", whatsapp="+55 11 99999-0000",
     r = requests.post(f"{API}/players/register", json=body,
                       headers={"X-Forwarded-For": _uniq_ip()})
     assert r.status_code == 200, f"register failed: {r.status_code} {r.text}"
-    return r.json()
+    assert r.json()["status"] == "PENDENTE", r.text
+    return _approve(r.json()["id"])
 
 
 # ---------- Core PATCH semantics ----------
@@ -226,7 +246,8 @@ class TestDeletePlayer:
         # register until 30 CONFIRMADO players (draw filters by status=CONFIRMADO)
         attempts = 0
         while attempts < 60:
-            all_p = requests.get(f"{API}/players", headers=admin_h).json()
+            all_p = requests.get(f"{API}/players", params={"all_statuses": "true"},
+                                 headers=admin_h).json()
             conf = [p for p in all_p if p.get("status") == "CONFIRMADO"]
             if len(conf) >= 30:
                 break

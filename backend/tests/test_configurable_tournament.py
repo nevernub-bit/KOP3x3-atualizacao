@@ -45,9 +45,10 @@ def admin():
 
 @pytest.fixture(scope="module", autouse=True)
 def restore_structure(admin):
+    _ADMIN_SESSION.append(admin)
     yield
     admin.post(f"{API}/tournament/reset")
-    for p in requests.get(f"{API}/players", headers=admin.headers).json():
+    for p in admin.get(f"{API}/players", params={"all_statuses": "true"}).json():
         admin.delete(f"{API}/players/{p['id']}")
     admin.patch(f"{API}/tournament", json={
         "num_teams": 10, "players_per_team": 3,
@@ -55,9 +56,13 @@ def restore_structure(admin):
     })
 
 
+# Admin session captured by the fixture so registrations can be approved.
+_ADMIN_SESSION: list = []
+
+
 def _clear(admin):
     admin.post(f"{API}/tournament/reset")
-    for p in requests.get(f"{API}/players", headers=admin.headers).json():
+    for p in admin.get(f"{API}/players", params={"all_statuses": "true"}).json():
         admin.delete(f"{API}/players/{p['id']}")
     admin.patch(f"{API}/tournament", json={
         "num_teams": 10, "players_per_team": 3,
@@ -66,6 +71,8 @@ def _clear(admin):
 
 
 def _register(n, prefix="CFG"):
+    """Register and approve: new registrations start as PENDENTE."""
+    admin = _ADMIN_SESSION[0]
     for i in range(n):
         r = requests.post(f"{API}/players/register", json={
             "name": f"{prefix}_{i:03d}_{uuid.uuid4().hex[:4]}",
@@ -73,6 +80,9 @@ def _register(n, prefix="CFG"):
             "photo": PHOTO,
         }, headers={"X-Forwarded-For": _ip()})
         assert r.status_code == 200, f"register {i}: {r.status_code} {r.text}"
+        ap = admin.patch(f"{API}/players/{r.json()['id']}/status",
+                         json={"status": "CONFIRMADO"})
+        assert ap.status_code == 200, f"approve {i}: {ap.status_code} {ap.text}"
 
 
 def _config(admin, num_teams, ppt, groups, qpg):

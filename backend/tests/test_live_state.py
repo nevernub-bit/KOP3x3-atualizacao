@@ -53,13 +53,15 @@ def fresh_tournament(admin_h):
     """Reset tournament & clear players to get a deterministic state."""
     r = requests.post(f"{API}/tournament/reset", headers=admin_h)
     assert r.status_code == 200, r.text
-    players = requests.get(f"{API}/players", headers=admin_h).json()
+    players = requests.get(f"{API}/players", params={"all_statuses": "true"},
+                           headers=admin_h).json()
     for p in players:
         requests.delete(f"{API}/players/{p['id']}", headers=admin_h)
     yield
 
 
 def _register_players(admin_h, n=30):
+    """Register and approve: new registrations start as PENDENTE."""
     for i in range(n):
         body = {
             "name": f"TEST_LIVE_{i:02d}_{uuid.uuid4().hex[:6]}",
@@ -69,6 +71,9 @@ def _register_players(admin_h, n=30):
         r = requests.post(f"{API}/players/register", json=body,
                           headers={"X-Forwarded-For": _uniq_ip()})
         assert r.status_code == 200, f"register #{i}: {r.status_code} {r.text}"
+        ap = requests.patch(f"{API}/players/{r.json()['id']}/status",
+                            json={"status": "CONFIRMADO"}, headers=admin_h)
+        assert ap.status_code == 200, f"approve #{i}: {ap.status_code} {ap.text}"
 
 
 @pytest.fixture(scope="session")

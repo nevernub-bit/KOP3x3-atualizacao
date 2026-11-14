@@ -44,18 +44,31 @@ def admin_h(admin_token):
 def clean_slate(admin_h):
     """Reset tournament and delete all players so we start fresh."""
     requests.post(f"{API}/tournament/reset", headers=admin_h)
-    players = requests.get(f"{API}/players", headers=admin_h).json()
+    players = requests.get(f"{API}/players", params={"all_statuses": "true"},
+                           headers=admin_h).json()
     for p in players:
         requests.delete(f"{API}/players/{p['id']}", headers=admin_h)
+    _ADMIN_H.update(admin_h)
     yield
 
 
+# Admin headers captured by the session fixture so registrations can be approved.
+_ADMIN_H: dict = {}
+
+
 def _register(ip="10.0.0.2", **overrides):
+    """Register and approve: new registrations start as PENDENTE."""
     body = {"name": overrides.pop("name", f"TEST_{uuid.uuid4().hex[:8]}"),
             "level": "INICIANTE", "photo": TINY_PHOTO}
     body.update(overrides)
-    return requests.post(f"{API}/players/register", json=body,
-                         headers={"X-Forwarded-For": ip})
+    r = requests.post(f"{API}/players/register", json=body,
+                      headers={"X-Forwarded-For": ip})
+    if r.status_code == 200:
+        pid = r.json()["id"]
+        r2 = requests.patch(f"{API}/players/{pid}/status",
+                            json={"status": "CONFIRMADO"}, headers=_ADMIN_H)
+        assert r2.status_code == 200, f"approve failed: {r2.status_code} {r2.text}"
+    return r
 
 
 # ---------- SEC-001 ----------

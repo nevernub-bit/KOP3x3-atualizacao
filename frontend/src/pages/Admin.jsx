@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, formatErr } from "../api";
+import { api, formatErr, isTestMode, setTestMode } from "../api";
 import { useAuth } from "../auth";
 import { toast } from "sonner";
 import { sfx } from "../sound";
-import { Shuffle, Trash2, RefreshCw, Lock, Unlock, Tv, Trophy, Swords, SkipForward, Pencil, Save, Users, Image as ImageIcon, FileText, Plus, UserCheck, UserX, RotateCcw, History, AlertTriangle } from "lucide-react";
+import { Shuffle, Trash2, RefreshCw, Lock, Unlock, Tv, Trophy, Swords, SkipForward, Pencil, Save, Users, Image as ImageIcon, FileText, Plus, UserCheck, UserX, RotateCcw, History, AlertTriangle, FlaskConical } from "lucide-react";
 import { PlayerEditModal } from "../components/PlayerEditModal";
 
 export default function Admin() {
@@ -41,6 +41,14 @@ export default function Admin() {
   const [bracketStatus, setBracketStatus] = useState(null);
   const [recalc, setRecalc] = useState(null);
   const [confirmRecalc, setConfirmRecalc] = useState(false);
+  // Registration approval + simulation panel
+  const [statusFilter, setStatusFilter] = useState("TODOS");
+  const [testMode, setLocalTestMode] = useState(isTestMode());
+  const [testStatus, setTestStatus] = useState(null);
+  const [testCount, setTestCount] = useState("12");
+  const [customTestCount, setCustomTestCount] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearPhrase, setClearPhrase] = useState("");
   const actionInFlight = useRef(false);
   const actionBusy = pendingAction !== null;
 
@@ -50,14 +58,16 @@ export default function Admin() {
 
   const load = async () => {
     const version = ++loadVersion.current;
-    const [t, tm, p, m, l, b, ru, rg, bs] = await Promise.all([
+    const [t, tm, p, m, l, b, ru, rg, bs, ts] = await Promise.all([
       api.get("/tournament"), api.get("/teams"),
-      api.get("/players"), api.get("/matches"),
+      api.get("/players", { params: { all_statuses: true } }), api.get("/matches"),
       api.get("/live/state"), api.get("/banner"),
       api.get("/rules"), api.get("/rangers"), api.get("/bracket/status"),
+      api.get("/admin/test/status").catch(() => null),
     ]);
     if (version !== loadVersion.current) return;
     setTour(t.data); setTeams(tm.data); setPlayers(p.data); setMatches(m.data); setLive(l.data);
+    setTestStatus(ts?.data || null);
     setBanner(b.data?.image || null);
     setRules(ru.data || null); setRulesDraft(ru.data?.content || "");
     setRangers(rg.data || []);
@@ -168,6 +178,52 @@ export default function Admin() {
       errorMessage: "Falha ao excluir jogador",
     });
   };
+  // --- Registration approval -------------------------------------------------
+  const setPlayerStatus = (id, status) => runAdminAction(`player-status-${id}-${status}`,
+    () => api.patch(`/players/${id}/status`, { status }), {
+      onSuccess: () => {
+        sfx.confirm();
+        toast.success(status === "CONFIRMADO" ? "Inscrição confirmada" : "Inscrição cancelada");
+      },
+      errorMessage: "Falha ao alterar o status da inscrição",
+    });
+
+  // --- Test simulation -------------------------------------------------------
+  const enterTestMode = () => runAdminAction("test-enter", async () => {
+    setTestMode(true);
+    setLocalTestMode(true);
+    const r = await api.post("/admin/test/session");
+    setTestStatus(r.data);
+    await load();
+    toast.success("Modo teste ativado — dados isolados");
+  }, { refresh: false, errorMessage: "Falha ao ativar o modo teste" });
+
+  const exitTestMode = () => {
+    setTestMode(false);
+    setLocalTestMode(false);
+    sfx.back();
+    toast.success("Modo teste desativado");
+    load().catch(() => toast.error("Não foi possível recarregar os dados reais"));
+  };
+
+  const createTestPlayers = () => runAdminAction("test-players", async () => {
+    const r = await api.post("/admin/test/players", { count: Number(testCount) });
+    setTestStatus(r.data.snapshot);
+    sfx.reveal();
+    toast.success(`${r.data.created} jogadores de teste criados`);
+  }, { errorMessage: "Falha ao criar jogadores de teste" });
+
+  const clearTestData = () => {
+    setConfirmClear(false);
+    return runAdminAction("test-clear", async () => {
+      const r = await api.post("/admin/test/clear", { confirm: clearPhrase });
+      setTestStatus(r.data.snapshot);
+      setClearPhrase("");
+      sfx.confirm();
+      toast.success("Simulação apagada — dados reais intactos");
+    }, { errorMessage: "Falha ao limpar a simulação" });
+  };
+
   const toggleLock = (id) => runAdminAction(`lock-match-${id}`, () => api.post(`/matches/${id}/lock`));
   const renameTeam = (id, name) => runAdminAction(`rename-team-${id}`, () => api.patch(`/teams/${id}`, { name }), {
     errorMessage: "Falha ao renomear equipe",
@@ -313,6 +369,12 @@ export default function Admin() {
   const pinnedMatch = matches.find(m => m.id === live.match_id);
   const pinnedTeams = pinnedMatch ? [teams.find(t => t.id === pinnedMatch.team_a)?.name, teams.find(t => t.id === pinnedMatch.team_b)?.name] : null;
 
+  const confirmedCount = players.filter(p => p.status === "CONFIRMADO").length;
+  const pendingList = players.filter(p => p.status === "PENDENTE");
+  const cancelledCount = players.filter(p => p.status === "CANCELADO").length;
+  const capacity = tour?.capacity ?? tour?.player_limit ?? (Number(cfg.num_teams || 0) * Number(cfg.players_per_team || 0));
+  const testCounts = testStatus?.test || null;
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-8 space-y-8">
       <div>
@@ -359,6 +421,110 @@ export default function Admin() {
         <div className="mt-3 text-[10px] text-slate-500 font-display uppercase tracking-widest">
           Ao clicar em START numa partida, o telão fixa automaticamente essa partida em modo Match.
         </div>
+      </section>
+
+      {/* TEST SIMULATION */}
+      <section data-testid="test-mode-section"
+        className={`bg-black/60 border-2 kop-chamfer p-5 ${testMode ? "border-yellow-400/70" : "border-slate-700"}`}>
+        <div className="flex items-center gap-2 mb-2 flex-wrap">
+          <FlaskConical className={`w-5 h-5 ${testMode ? "text-yellow-400" : "text-slate-400"}`} />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Modo Teste / Simulação</h2>
+          <span data-testid="test-mode-badge"
+            className={`ml-auto text-[10px] font-display uppercase tracking-widest px-2 py-0.5 border ${testMode ? "border-yellow-400 text-yellow-400" : "border-slate-600 text-slate-500"}`}>
+            {testMode ? "Ativo" : "Desligado"}
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-400 font-display uppercase tracking-widest leading-relaxed">
+          Usa as mesmas regras, sorteio, partidas e classificação do evento — em coleções separadas
+          (<span className="text-yellow-300">*_test</span>). Nada daqui aparece na Home pública, no sorteio oficial, nas
+          equipes, nas partidas ou nas estatísticas reais.
+        </p>
+
+        {testMode && testCounts && (
+          <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+            <div className="border border-yellow-500/40 p-2">
+              <div className="text-slate-500 uppercase text-[10px] tracking-widest">Jogadores teste</div>
+              <div className="font-arcade text-yellow-300 text-lg">{testCounts.players}</div>
+            </div>
+            <div className="border border-yellow-500/40 p-2">
+              <div className="text-slate-500 uppercase text-[10px] tracking-widest">Equipes teste</div>
+              <div className="font-arcade text-yellow-300 text-lg">{testCounts.teams}</div>
+            </div>
+            <div className="border border-yellow-500/40 p-2">
+              <div className="text-slate-500 uppercase text-[10px] tracking-widest">Partidas teste</div>
+              <div className="font-arcade text-yellow-300 text-lg">{testCounts.matches}</div>
+            </div>
+            <div className="border border-slate-700 p-2">
+              <div className="text-slate-500 uppercase text-[10px] tracking-widest">Reais intactos</div>
+              <div className="font-arcade text-green-400 text-lg">{testStatus?.real?.players ?? "—"}</div>
+            </div>
+          </div>
+        )}
+
+        {!testMode ? (
+          <button data-testid="enter-test-mode" onClick={enterTestMode} disabled={actionBusy}
+            className="mt-3 kop-chamfer bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
+            <FlaskConical className="w-4 h-4" /> {pendingAction === "test-enter" ? "Ativando..." : "Entrar no modo teste"}
+          </button>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-xs font-display uppercase tracking-widest text-slate-400">
+                Jogadores
+                <select data-testid="test-player-count" value={testCount} disabled={actionBusy}
+                  onChange={e => setTestCount(e.target.value)}
+                  className="block mt-1 bg-slate-900 border border-slate-700 focus:border-yellow-400 px-3 py-2 text-white font-mono-num outline-none">
+                  {["6", "9", "12", "18", "24", "30", "custom"].map(v => (
+                    <option key={v} value={v}>{v === "custom" ? "Personalizado" : v}</option>
+                  ))}
+                </select>
+              </label>
+              {testCount === "custom" && (
+                <label className="text-xs font-display uppercase tracking-widest text-slate-400">
+                  Quantidade
+                  <input data-testid="test-player-count-custom" type="number" min="1" max="200"
+                    value={customTestCount} disabled={actionBusy}
+                    onChange={e => setCustomTestCount(e.target.value)}
+                    className="block mt-1 w-28 bg-slate-900 border border-slate-700 focus:border-yellow-400 px-3 py-2 text-white font-mono-num outline-none" />
+                </label>
+              )}
+              <button data-testid="create-test-players"
+                onClick={() => { if (testCount === "custom") setTestCount(String(Math.max(1, Math.min(200, Number(customTestCount) || 1)))); createTestPlayers(); }}
+                disabled={actionBusy}
+                className="kop-chamfer bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 text-black font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2">
+                <Plus className="w-4 h-4" /> {pendingAction === "test-players" ? "Criando..." : "Criar jogadores de teste"}
+              </button>
+              <button data-testid="exit-test-mode-panel" onClick={exitTestMode} disabled={actionBusy}
+                className="kop-chamfer border-2 border-slate-600 text-slate-300 hover:text-white font-arcade uppercase tracking-widest px-4 py-2">
+                Sair do modo teste
+              </button>
+            </div>
+
+            <div className="border border-red-900/50 p-3">
+              <div className="text-xs font-display uppercase tracking-widest text-slate-400 mb-2">
+                Limpar simulação — apaga apenas jogadores, equipes, partidas e histórico de teste
+              </div>
+              {confirmClear ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <input data-testid="clear-test-phrase" value={clearPhrase} disabled={actionBusy}
+                    onChange={e => setClearPhrase(e.target.value)} placeholder="LIMPAR SIMULACAO"
+                    className="bg-slate-900 border border-slate-700 px-3 py-1.5 text-white text-sm font-mono-num outline-none" />
+                  <button data-testid="clear-test-confirm" onClick={clearTestData} disabled={actionBusy || clearPhrase.trim().toUpperCase() !== "LIMPAR SIMULACAO"}
+                    className="kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-arcade uppercase tracking-widest px-3 py-2">
+                    {pendingAction === "test-clear" ? "Limpando..." : "Confirmar limpeza"}
+                  </button>
+                  <button onClick={() => { setConfirmClear(false); setClearPhrase(""); }} disabled={actionBusy}
+                    className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">Cancelar</button>
+                </div>
+              ) : (
+                <button data-testid="clear-test-open" onClick={() => setConfirmClear(true)} disabled={actionBusy}
+                  className="kop-chamfer border-2 border-red-600 text-red-400 hover:bg-red-600 hover:text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 disabled:opacity-50">
+                  <Trash2 className="w-4 h-4" /> Limpar simulação
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="bg-black/60 border border-red-900/50 kop-chamfer p-5">
@@ -473,7 +639,9 @@ export default function Admin() {
         <div className="grid sm:grid-cols-2 gap-3">
           {teams.map(t => (
             <div key={t.id} className="flex items-center gap-2 border border-slate-800 p-2">
-              <span className="text-slate-500 font-mono-num text-xs">{t.group}</span>
+              <span className="text-slate-500 font-mono-num text-[10px] tracking-widest whitespace-nowrap">
+                TEAM {String((t.order ?? 0) + 1).padStart(2, "0")}
+              </span>
               <input defaultValue={t.name} onBlur={e => e.target.value !== t.name && renameTeam(t.id, e.target.value)}
                 data-testid={`team-rename-${t.id}`}
                 className="flex-1 bg-transparent text-white font-display uppercase tracking-widest outline-none border-b border-transparent focus:border-red-500" />
@@ -481,6 +649,67 @@ export default function Admin() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* REGISTRATION APPROVAL */}
+      <section data-testid="pending-registrations" className="bg-black/60 border-2 border-yellow-500/40 kop-chamfer p-5">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          <UserCheck className="w-5 h-5 text-yellow-400" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">
+            Inscrições Pendentes ({pendingList.length})
+          </h2>
+        </div>
+        <div className="grid grid-cols-3 gap-2 mb-4 text-center">
+          <div className="border border-green-500/40 p-2">
+            <div className="text-[10px] text-slate-500 uppercase tracking-widest">Confirmados</div>
+            <div data-testid="count-confirmed" className="font-arcade text-green-400 text-lg">{confirmedCount} / {capacity}</div>
+          </div>
+          <div className="border border-yellow-500/40 p-2">
+            <div className="text-[10px] text-slate-500 uppercase tracking-widest">Pendentes</div>
+            <div data-testid="count-pending" className="font-arcade text-yellow-400 text-lg">{pendingList.length}</div>
+          </div>
+          <div className="border border-red-500/40 p-2">
+            <div className="text-[10px] text-slate-500 uppercase tracking-widest">Cancelados</div>
+            <div data-testid="count-cancelled" className="font-arcade text-red-400 text-lg">{cancelledCount}</div>
+          </div>
+        </div>
+        {pendingList.length === 0 ? (
+          <p className="text-slate-500 text-xs font-display uppercase tracking-widest">
+            Nenhuma inscrição aguardando aprovação.
+          </p>
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-3">
+            {pendingList.map(p => (
+              <div key={p.id} data-testid={`pending-${p.id}`} className="border border-slate-800 p-3 flex gap-3">
+                {p.photo ? (
+                  <img src={p.photo} alt={p.name} className="w-16 h-20 object-cover border border-yellow-500/40" />
+                ) : (
+                  <div className="w-16 h-20 bg-slate-800 flex items-center justify-center text-slate-600">?</div>
+                )}
+                <div className="min-w-0 flex-1 text-xs">
+                  <div className="text-white font-display uppercase tracking-wide truncate">{p.name}</div>
+                  {p.nickname && <div className="text-cyan-300 truncate">"{p.nickname}"</div>}
+                  <div className="text-slate-400">{p.level}</div>
+                  {p.whatsapp && <div className="text-slate-500 font-mono-num">📱 {p.whatsapp}</div>}
+                  {p.notes && <div className="text-slate-500 italic truncate" title={p.notes}>“{p.notes}”</div>}
+                  <div className="text-slate-600 font-mono-num text-[10px] mt-1">
+                    {p.created_at ? new Date(p.created_at).toLocaleString("pt-BR") : "—"}
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    <button data-testid={`approve-${p.id}`} onClick={() => setPlayerStatus(p.id, "CONFIRMADO")} disabled={actionBusy}
+                      className="kop-chamfer bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-display uppercase tracking-widest px-2 py-1 text-[10px] flex items-center gap-1">
+                      <UserCheck className="w-3 h-3" /> Confirmar
+                    </button>
+                    <button data-testid={`cancel-${p.id}`} onClick={() => setPlayerStatus(p.id, "CANCELADO")} disabled={actionBusy}
+                      className="kop-chamfer border border-red-600 text-red-400 hover:bg-red-600 hover:text-white disabled:opacity-50 font-display uppercase tracking-widest px-2 py-1 text-[10px] flex items-center gap-1">
+                      <UserX className="w-3 h-3" /> Cancelar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="bg-black/60 border border-red-900/50 kop-chamfer p-5">
@@ -493,6 +722,14 @@ export default function Admin() {
             placeholder="Buscar nome, apelido…"
             className="bg-slate-900 border border-slate-700 focus:border-red-500 px-3 py-1 text-white text-sm outline-none max-w-xs"
           />
+        </div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {["TODOS", "CONFIRMADO", "PENDENTE", "CANCELADO"].map(s => (
+            <button key={s} data-testid={`filter-${s}`} onClick={() => setStatusFilter(s)}
+              className={`px-2 py-1 text-[10px] font-display uppercase tracking-widest border ${statusFilter === s ? "border-red-500 text-red-400 bg-red-500/10" : "border-slate-700 text-slate-400"}`}>
+              {s}
+            </button>
+          ))}
         </div>
         <div className="max-h-[32rem] overflow-auto">
           <table className="w-full text-sm min-w-[640px]">
@@ -508,6 +745,7 @@ export default function Admin() {
             </thead>
             <tbody>
               {players
+                .filter(p => statusFilter === "TODOS" || p.status === statusFilter)
                 .filter(p => {
                   if (!playerSearch.trim()) return true;
                   const q = playerSearch.trim().toLowerCase();
@@ -610,7 +848,6 @@ export default function Admin() {
           </div>
         )}
       </section>
-
       <section className="bg-black/60 border-2 border-amber-500/40 kop-chamfer p-5">
         <div className="flex items-center gap-2 mb-3">
           <ImageIcon className="w-5 h-5 text-amber-400" />

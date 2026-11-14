@@ -1,19 +1,47 @@
 import React, { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../auth";
-import { LogOut, Shield, Volume2, VolumeX } from "lucide-react";
+import { LogOut, Shield, Volume2, VolumeX, FlaskConical } from "lucide-react";
 import { isMuted, setMuted, sfx } from "../sound";
+import { isTestMode, setTestMode } from "../api";
 
 export function Layout({ children, hideNav = false }) {
   const loc = useLocation();
   const { isAdmin, isRanger, logout } = useAuth();
   const [muted, setLocalMuted] = useState(isMuted());
+  const [testMode, setLocalTestMode] = useState(isTestMode());
 
   useEffect(() => {
     const onChange = () => setLocalMuted(isMuted());
     window.addEventListener("kop-sound-change", onChange);
     return () => window.removeEventListener("kop-sound-change", onChange);
   }, []);
+
+  useEffect(() => {
+    const onChange = () => setLocalTestMode(isTestMode());
+    window.addEventListener("kop-test-mode-change", onChange);
+    return () => window.removeEventListener("kop-test-mode-change", onChange);
+  }, []);
+
+  const leaveTestMode = () => {
+    setTestMode(false);
+    window.location.reload();
+  };
+
+  // Always visible while simulating, on every page: nobody should mistake
+  // simulation data for the real event.
+  const testBar = testMode ? (
+    <div data-testid="test-mode-bar" className="sticky top-0 z-50 bg-yellow-500 text-black">
+      <div className="max-w-7xl mx-auto px-4 py-1.5 flex items-center gap-2 text-xs font-display uppercase tracking-widest">
+        <FlaskConical className="w-4 h-4 shrink-0" />
+        <span className="truncate">Modo teste — dados fictícios (não é o evento real)</span>
+        <button data-testid="exit-test-mode" onClick={leaveTestMode}
+          className="ml-auto shrink-0 border border-black/40 px-2 py-0.5 hover:bg-black hover:text-yellow-400">
+          Sair do teste
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   const toggleMute = () => {
     const next = !muted;
@@ -22,10 +50,11 @@ export function Layout({ children, hideNav = false }) {
     if (!next) sfx.select();
   };
 
-  if (hideNav) return <div className="min-h-screen">{children}</div>;
+  if (hideNav) return <div className="min-h-screen">{testBar}{children}</div>;
 
   return (
     <div className="min-h-screen flex flex-col">
+      {testBar}
       <header className="border-b border-red-900/50 bg-black/80 backdrop-blur sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <Link to="/" data-testid="header-home-link" onClick={() => sfx.navigate()} className="flex items-center gap-2 group">

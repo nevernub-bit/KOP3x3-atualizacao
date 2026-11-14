@@ -221,7 +221,7 @@ function RegistrationForm({ onSubmitted }) {
         whatsapp: whatsapp || null, notes: notes || null,
       });
       sfx.success();
-      toast.success("Inscrição confirmada!");
+      toast.success("Inscrição enviada! Aguardando aprovação do organizador.");
       onSubmitted(r.data);
     } catch (err) {
       toast.error(formatErr(err.response?.data?.detail) || "Falha no envio");
@@ -302,25 +302,26 @@ function RegistrationForm({ onSubmitted }) {
   );
 }
 
-// --- STAGE 4: Confirmed ---
-function ConfirmedScreen({ player }) {
+// --- STAGE 4: Submitted (waiting for the organizer's approval) ---
+function SubmittedScreen({ player }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-10 animate-kop-slam">
       <div className="max-w-md w-full text-center">
         <div className="font-arcade text-cyan-300 text-sm tracking-widest uppercase mb-2 animate-kop-flicker">
-          ✓ Inscrição Confirmada
+          ✓ Inscrição Enviada
         </div>
-        <h1 className="font-arcade text-3xl text-red-500 mb-6 animate-kop-pulse">READY TO FIGHT!</h1>
+        <h1 className="font-arcade text-3xl text-red-500 mb-6 animate-kop-pulse">AGUARDANDO APROVAÇÃO</h1>
         <div className="flex justify-center mb-4">
           <PlayerCard player={player} size="xl" testId="confirmed-card" />
         </div>
         <div className="font-display text-2xl text-white uppercase mt-2">{player.name}</div>
         {player.nickname && <div className="text-cyan-300 uppercase text-sm tracking-widest">"{player.nickname}"</div>}
-        <div className="mt-4 inline-block border border-green-500/60 text-green-400 px-3 py-1 font-display text-xs uppercase tracking-widest">
-          STATUS: CONFIRMADO
+        <div className="mt-4 inline-block border border-yellow-500/60 text-yellow-400 px-3 py-1 font-display text-xs uppercase tracking-widest">
+          STATUS: PENDENTE
         </div>
         <div className="mt-6 text-slate-500 text-sm">
-          Aguarde o sorteio das equipes pelo organizador.
+          O organizador vai analisar sua inscrição. A foto e os dados só ficam públicos
+          depois da confirmação.
         </div>
       </div>
     </div>
@@ -345,7 +346,7 @@ export default function Register() {
 
   if (stage === "start") return <StartScreen onStart={handleStart} muted={muted} setMuted={setMuted} />;
   if (stage === "transition") return <Transition />;
-  if (stage === "done" && confirmed) return <ConfirmedScreen player={confirmed} />;
+  if (stage === "done" && confirmed) return <SubmittedScreen player={confirmed} />;
   return (
     <RegistrationForm onSubmitted={(p) => { setConfirmed(p); setStage("done"); }} />
   );

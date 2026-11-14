@@ -63,12 +63,18 @@ def admin_h():
 
 def _reset(admin_h):
     assert requests.post(f"{API}/tournament/reset", headers=admin_h).status_code == 200
-    for p in requests.get(f"{API}/players", headers=admin_h).json():
+    for p in requests.get(f"{API}/players", params={"all_statuses": "true"},
+                          headers=admin_h).json():
         requests.delete(f"{API}/players/{p['id']}", headers=admin_h)
-    requests.patch(f"{API}/tournament", json={"player_limit": 60}, headers=admin_h)
+    # Capacity is derived from the structure (teams × players per team).
+    requests.patch(f"{API}/tournament", json={
+        "num_teams": 10, "players_per_team": 6,
+        "num_groups": 2, "qualifiers_per_group": 2,
+    }, headers=admin_h)
 
 
 def _register(admin_h, n=30):
+    """Register and approve: new registrations start as PENDENTE."""
     levels = ["PROFISSIONAL", "INTERMEDIÁRIO", "INICIANTE"]
     for i in range(n):
         body = {"name": f"TEST_PERS_{i:02d}_{uuid.uuid4().hex[:5]}",
@@ -76,6 +82,9 @@ def _register(admin_h, n=30):
         r = requests.post(f"{API}/players/register", json=body,
                           headers={"X-Forwarded-For": _uniq_ip()})
         assert r.status_code == 200, f"register #{i}: {r.status_code} {r.text}"
+        ap = requests.patch(f"{API}/players/{r.json()['id']}/status",
+                            json={"status": "CONFIRMADO"}, headers=admin_h)
+        assert ap.status_code == 200, f"approve #{i}: {ap.status_code} {ap.text}"
 
 
 def _matches():

@@ -7,16 +7,19 @@ import os
 import re
 import uuid
 import random
+import base64
 import logging
 import hashlib
 import json
 import scoring
+from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
 import bcrypt
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -31,10 +34,112 @@ JWT_ALG = "HS256"
 DEFAULT_DURATION_S = 300  # 5 minutes
 
 client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+
+
+# ---------- Data scope: REAL production vs TEST simulation ----------
+# Every request runs in exactly one scope. The default is REAL, so nothing a
+# public visitor or the event itself does can reach simulation data. Simulation
+# data lives in physically separate collections (`players_test`, `teams_test`,
+# `matches_test`, `tournament_test`, `match_history_test`) as requested: no
+# `is_test` filter inside the production collections.
+#
+# The scope is a ContextVar read by the `db` proxy below, so every existing
+# `db.matches.find(...)` call in this file respects it without being rewritten.
+SCOPE_REAL = "REAL"
+SCOPE_TEST = "TEST"
+TEST_SUFFIX = "_test"
+SCOPED_COLLECTIONS = frozenset({
+    "players", "teams", "matches", "tournament", "match_history",
+})
+
+_CURRENT_SCOPE: ContextVar[str] = ContextVar("kop_scope", default=SCOPE_REAL)
+
+
+def current_scope() -> str:
+    return _CURRENT_SCOPE.get()
+
+
+def is_test_scope() -> bool:
+    return _CURRENT_SCOPE.get() == SCOPE_TEST
+
+
+class ScopedDatabase:
+    """Mongo database proxy that applies the request scope to data collections.
+
+    `users`, `rules` and `banner` are deliberately NOT scoped: signing in, the
+    public regulation and the event banner are the same in a simulation.
+    """
+
+    def __init__(self, database):
+        self._database = database
+
+    def _resolve(self, name: str):
+        if name in SCOPED_COLLECTIONS and is_test_scope():
+            return f"{name}{TEST_SUFFIX}"
+        return name
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._database[self._resolve(name)]
+
+    def __getitem__(self, name):
+        return self._database[self._resolve(name)]
+
+    async def list_collection_names(self):
+        return await self._database.list_collection_names()
+
+
+_DATABASE = client[DB_NAME]
+db = ScopedDatabase(_DATABASE)
+
+
+def real_collection(name: str):
+    """Explicit access to a production collection, regardless of the scope.
+
+    Used only by the simulation panel to read the event structure it mirrors and
+    to prove real data is untouched. Never used to write production data.
+    """
+    return _DATABASE[name]
+
+
+async def _resolve_request_scope(request: Request) -> str:
+    """Simulation scope requires a valid admin token — the header alone is never enough."""
+    requested = (request.headers.get("x-kop-scope") or "").strip().upper()
+    if not requested or requested == SCOPE_REAL:
+        return SCOPE_REAL
+    if requested != SCOPE_TEST:
+        raise HTTPException(400, "Escopo inválido")
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(403, "Sessão de teste exige autenticação de administrador")
+    try:
+        payload = jwt.decode(auth.split(" ", 1)[1], JWT_SECRET, algorithms=[JWT_ALG])
+    except Exception:
+        raise HTTPException(403, "Sessão de teste inválida")
+    user = await _DATABASE.users.find_one({"id": payload.get("sub")})
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Somente administrador pode usar o modo teste")
+    return SCOPE_TEST
+
+
+async def scope_middleware(request: Request, call_next):
+    try:
+        scope = await _resolve_request_scope(request)
+    except HTTPException as exc:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    token = _CURRENT_SCOPE.set(scope)
+    try:
+        return await call_next(request)
+    finally:
+        _CURRENT_SCOPE.reset(token)
 
 app = FastAPI(title="KINGS OF PAINTBALL — KOP 3x3")
 api = APIRouter(prefix="/api")
+
+# Registered right after the app exists; CORS is added later (outermost) so
+# preflight requests are answered before scope resolution.
+app.middleware("http")(scope_middleware)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("kop")
@@ -521,6 +626,26 @@ def compute_result(match, teams_by_id):
     return scoring.compute_result(match, teams_by_id)
 
 
+async def migrate_player_status() -> int:
+    """Give records created before the approval flow a status (CONFIRMADO).
+
+    Matches only missing/empty values, so it can never overwrite a manual
+    decision or downgrade a confirmed inscription.
+    """
+    res = await db.players.update_many(
+        {"$or": [
+            {"status": {"$exists": False}},
+            {"status": None},
+            {"status": ""},
+        ]},
+        {"$set": {"status": "CONFIRMADO"}},
+    )
+    if res.modified_count:
+        log.info("migrate_player_status: %s registro(s) sem status -> CONFIRMADO",
+                 res.modified_count)
+    return res.modified_count
+
+
 async def migrate_structural_defaults():
     """Backfill ONLY missing structural fields on match documents.
 
@@ -598,6 +723,11 @@ async def startup():
     # are never recomputed here (see migrate_structural_defaults).
     await migrate_structural_defaults()
 
+    # Registration status backfill: only documents that have no status at all
+    # are touched. Existing values (the real CONFIRMADO inscriptions) are never
+    # rewritten, so this is safe to run on every boot and idempotent.
+    await migrate_player_status()
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -635,17 +765,22 @@ async def register_player(body: PlayerRegisterIn, request: Request):
     if not body.photo.startswith("data:image/"):
         raise HTTPException(400, "Formato de foto inválido")
     t = await db.tournament.find_one({"id": "main"}) or {}
-    count = await db.players.count_documents({})
+    # Only confirmed registrations occupy an official vacancy: a pending
+    # inscription never blocks a spot while the admin reviews it.
+    count = await db.players.count_documents({"status": "CONFIRMADO"})
     capacity = tournament_config(t)["capacity"]
     if count >= capacity:
-        raise HTTPException(400, "Limite de inscrições atingido")
+        raise HTTPException(400, "Limite de inscrições confirmadas atingido")
     player = {
         "id": str(uuid.uuid4()), "name": body.name.strip(),
         "nickname": (body.nickname or "").strip() or None,
         "level": body.level, "photo": body.photo,
         "whatsapp": (body.whatsapp or "").strip() or None,
         "notes": (body.notes or "").strip() or None,
-        "status": "CONFIRMADO", "team_id": None, "created_at": now_iso(),
+        # New registrations wait for the organizer: nothing pending is public,
+        # drawn, or counted towards the official vacancies.
+        "status": "PENDENTE", "team_id": None, "created_at": now_iso(),
+        "status_updated_at": None,
     }
     await db.players.insert_one(player)
     # Owner receives their own full record; anonymous list/detail are projected below.
@@ -657,6 +792,7 @@ async def list_players(
     request: Request,
     photos: bool = True,
     ids: Optional[str] = None,
+    all_statuses: bool = False,
     user=Depends(optional_current_user),
 ):
     """Player list.
@@ -666,12 +802,18 @@ async def list_players(
     screen separately (`ids=<id,id,...>`). Both extras are opt-in: without them
     the response is exactly the previous full list.
     """
-    query: dict = {}
+    is_admin = bool(user and user.get("role") == "admin")
+    # Public surfaces (Home, Player Select, Team Select, Stats) only ever see
+    # confirmed players. Even an authenticated admin browsing those pages gets
+    # the public view; only the admin panel opts into every registration by
+    # asking for `all_statuses=true`.
+    include_all = is_admin and all_statuses
+    query: dict = {} if include_all else {"status": "CONFIRMADO"}
     if ids:
         wanted = [i.strip() for i in ids.split(",") if i.strip()][:200]
         query["id"] = {"$in": wanted}
     docs = await db.players.find(query).sort("created_at", 1).to_list(1000)
-    if user and user.get("role") == "admin":
+    if is_admin:
         payload = [clean(d) for d in docs]
     else:
         payload = [public_player(d) for d in docs]
@@ -685,7 +827,8 @@ async def list_players(
     headers = {
         "ETag": etag,
         "Cache-Control": "private, max-age=0, must-revalidate",
-        "Vary": "Authorization",
+        # The body also depends on the data scope (real vs simulation).
+        "Vary": "Authorization, X-KOP-Scope",
     }
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
@@ -698,7 +841,57 @@ async def get_player(pid: str, user=Depends(optional_current_user)):
     if not d: raise HTTPException(404, "Jogador não encontrado")
     if user and user.get("role") == "admin":
         return clean(d)
+    # A pending/cancelled registration must not be publicly reachable by id.
+    if d.get("status") != "CONFIRMADO":
+        raise HTTPException(404, "Jogador não encontrado")
     return public_player(d)
+
+
+class PlayerStatusIn(BaseModel):
+    status: Literal["PENDENTE", "CONFIRMADO", "CANCELADO"]
+    reason: Optional[str] = Field(None, max_length=300)
+
+
+@api.patch("/players/{pid}/status")
+async def set_player_status(pid: str, body: PlayerStatusIn, user=Depends(require_admin)):
+    """Registration approval flow: PENDENTE -> CONFIRMADO | CANCELADO.
+
+    Never deletes anything: a cancelled registration keeps the whole document
+    (photo, WhatsApp, notes, timestamps) for the administrative history.
+    """
+    p = await db.players.find_one({"id": pid})
+    if not p:
+        raise HTTPException(404, "Jogador não encontrado")
+    if p.get("status") == body.status:
+        return clean(p)
+
+    t = await db.tournament.find_one({"id": "main"}) or {}
+    # The official draw is already configured in production: changing the status
+    # of somebody who is part of it would invalidate teams/matches.
+    if t.get("draw_done") and p.get("team_id"):
+        raise HTTPException(409, (
+            "Este jogador já faz parte do sorteio oficial. "
+            "Reinicie o torneio antes de alterar o status."
+        ))
+
+    if body.status == "CONFIRMADO" and p.get("status") != "CONFIRMADO":
+        confirmed = await db.players.count_documents({"status": "CONFIRMADO"})
+        capacity = tournament_config(t)["capacity"]
+        if confirmed >= capacity:
+            raise HTTPException(400, (
+                f"Limite de {capacity} vagas confirmadas atingido. "
+                f"Cancele uma inscrição antes de confirmar outra."
+            ))
+
+    updates = {
+        "status": body.status,
+        "status_updated_at": now_iso(),
+        "status_updated_by": user.get("email"),
+    }
+    if body.reason:
+        updates["status_reason"] = body.reason.strip()
+    await db.players.update_one({"id": pid}, {"$set": updates})
+    return clean(await db.players.find_one({"id": pid}))
 
 
 @api.patch("/players/{pid}")
@@ -730,6 +923,161 @@ async def delete_player(pid: str, _=Depends(require_admin)):
     await db.players.delete_one({"id": pid})
     await db.teams.update_many({}, {"$pull": {"players": pid}})
     return {"ok": True}
+
+
+# ---------- TEST SIMULATION (physically isolated collections) ----------
+# Everything below runs in the TEST scope (`*_test` collections). It uses the
+# very same functions as the real event (draw, matches, timer, eliminations,
+# standings, playoffs) — only the data scope changes.
+TEST_PLAYER_PREFIX = "TESTE"
+MAX_TEST_PLAYERS = 200
+TEST_CLEANUP_CONFIRM = "LIMPAR SIMULACAO"
+_LEVEL_CYCLE = ("INICIANTE", "INTERMEDIÁRIO", "PROFISSIONAL")
+
+
+class TestPlayersIn(BaseModel):
+    count: int = Field(..., ge=1, le=MAX_TEST_PLAYERS)
+
+
+class TestCleanupIn(BaseModel):
+    confirm: str = Field(..., min_length=1, max_length=60)
+
+
+def _test_avatar(label: str) -> str:
+    """Self-contained placeholder photo: no upload, no external storage."""
+    palette = ("#ff2e4c", "#00e5ff", "#ffd000", "#a855f7", "#22c55e", "#f97316")
+    color = palette[sum(ord(c) for c in label) % len(palette)]
+    initials = label.split()[-1] if label.split() else "00"
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="320" '
+        'viewBox="0 0 240 320">'
+        '<rect width="240" height="320" fill="#08080d"/>'
+        f'<circle cx="120" cy="120" r="62" fill="{color}" opacity="0.16"/>'
+        f'<circle cx="120" cy="120" r="62" fill="none" stroke="{color}" stroke-width="2" opacity="0.65"/>'
+        f'<text x="120" y="142" font-family="Arial,Helvetica,sans-serif" font-size="62" '
+        f'font-weight="bold" fill="{color}" text-anchor="middle">{initials}</text>'
+        f'<text x="120" y="252" font-family="Arial,Helvetica,sans-serif" font-size="28" '
+        f'fill="{color}" text-anchor="middle" letter-spacing="5">SIM</text>'
+        '</svg>'
+    )
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode()
+
+
+async def _test_snapshot() -> dict:
+    """Counts for the simulation scope plus a read-only view of the real one."""
+    test_counts = {}
+    for name in ("players", "teams", "matches", "match_history"):
+        test_counts[name] = await db[name].count_documents({})
+    real_counts = {}
+    for name in ("players", "teams", "matches"):
+        real_counts[name] = await real_collection(name).count_documents({})
+    t = await db.tournament.find_one({"id": "main"}) or {}
+    cfg = tournament_config(t)
+    return {
+        "scope": current_scope(),
+        "test": {
+            **test_counts,
+            "draw_done": bool(t.get("draw_done")),
+            "status": t.get("status") or "OPEN",
+            "capacity": cfg["capacity"],
+            "num_teams": cfg["num_teams"],
+            "players_per_team": cfg["players_per_team"],
+            "num_groups": cfg["num_groups"],
+            "qualifiers_per_group": cfg["qualifiers_per_group"],
+        },
+        "real": real_counts,
+    }
+
+
+async def _ensure_test_session() -> dict:
+    """Create the simulation's own tournament document, mirroring the structure."""
+    t = await db.tournament.find_one({"id": "main"})
+    if not t:
+        real_t = await real_collection("tournament").find_one({"id": "main"}) or {}
+        cfg = tournament_config(real_t)
+        t = {
+            "id": "main", "name": "KOP 3x3 — SIMULAÇÃO",
+            "num_teams": cfg["num_teams"],
+            "players_per_team": cfg["players_per_team"],
+            "num_groups": cfg["num_groups"],
+            "qualifiers_per_group": cfg["qualifiers_per_group"],
+            "player_limit": cfg["capacity"],
+            "status": "OPEN", "draw_done": False, "mvp_player_id": None,
+            "default_duration_s": int(real_t.get("default_duration_s") or DEFAULT_DURATION_S),
+            "live_mode": "MATCH", "live_match_id": None,
+            "is_test": True, "created_at": now_iso(),
+        }
+        await db.tournament.insert_one(dict(t))
+    return t
+
+
+@api.post("/admin/test/session")
+async def open_test_session(_=Depends(require_admin)):
+    """Prepare the simulation (idempotent). Requires the TEST scope header."""
+    if not is_test_scope():
+        raise HTTPException(400, "Ative o modo teste para usar esta rota")
+    await _ensure_test_session()
+    return await _test_snapshot()
+
+
+@api.get("/admin/test/status")
+async def test_status(_=Depends(require_admin)):
+    return await _test_snapshot()
+
+
+@api.post("/admin/test/players")
+async def create_test_players(body: TestPlayersIn, _=Depends(require_admin)):
+    """Create fictitious players (TESTE 01, TESTE 02, ...) inside `players_test`."""
+    if not is_test_scope():
+        raise HTTPException(400, "Ative o modo teste para usar esta rota")
+    await _ensure_test_session()
+    existing = await db.players.count_documents({})
+    if existing + body.count > MAX_TEST_PLAYERS:
+        raise HTTPException(400, f"Limite de {MAX_TEST_PLAYERS} jogadores de teste")
+    created = []
+    for i in range(body.count):
+        number = existing + i + 1
+        label = f"{TEST_PLAYER_PREFIX} {number:02d}"
+        doc = {
+            "id": str(uuid.uuid4()),
+            "name": label,
+            "nickname": f"SIM{number:02d}",
+            "level": _LEVEL_CYCLE[(number - 1) % len(_LEVEL_CYCLE)],
+            "photo": _test_avatar(label),
+            "whatsapp": f"+55 00 90000-{number:04d}",
+            "notes": "Jogador fictício — modo simulação",
+            "status": "CONFIRMADO",
+            "team_id": None,
+            "is_test": True,
+            "created_at": now_iso(),
+            "status_updated_at": None,
+        }
+        await db.players.insert_one(dict(doc))
+        created.append(doc["id"])
+    return {"ok": True, "created": len(created), "ids": created,
+            "snapshot": await _test_snapshot()}
+
+
+@api.post("/admin/test/clear")
+async def clear_test_data(body: TestCleanupIn, _=Depends(require_admin)):
+    """Delete the simulation and nothing else.
+
+    Runs only in the TEST scope, and each deletion targets a `*_test`
+    collection through the scoped proxy. Real collections are not referenced.
+    """
+    if not is_test_scope():
+        raise HTTPException(400, "Ative o modo teste para usar esta rota")
+    if body.confirm.strip().upper() != TEST_CLEANUP_CONFIRM:
+        raise HTTPException(400, f"Confirmação inválida: digite {TEST_CLEANUP_CONFIRM}")
+    deleted = {}
+    for name in ("matches", "match_history", "teams", "players"):
+        res = await db[name].delete_many({})
+        deleted[name] = res.deleted_count
+    # The structure is recreated (empty) so the panel keeps working.
+    await db.tournament.delete_many({"id": "main"})
+    await _ensure_test_session()
+    deleted["tournament"] = 1
+    return {"ok": True, "deleted": deleted, "snapshot": await _test_snapshot()}
 
 
 # ---------- Teams ----------
@@ -937,7 +1285,7 @@ async def update_tournament(body: TournamentUpdate, _=Depends(require_admin)):
                                  merged["num_groups"], merged["qualifiers_per_group"])
         if err:
             raise HTTPException(400, err)
-        players_count = await db.players.count_documents({})
+        players_count = await db.players.count_documents({"status": "CONFIRMADO"})
         capacity = merged["num_teams"] * merged["players_per_team"]
         if players_count > capacity:
             excess = players_count - capacity
