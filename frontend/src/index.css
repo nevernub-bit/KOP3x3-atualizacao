@@ -215,6 +215,101 @@ body {
     animation: kop-flicker 4s infinite;
 }
 
+@keyframes kop-select-glow {
+    0% {
+        box-shadow:
+            0 0 0 rgba(255, 46, 76, 0.2),
+            inset 0 0 10px rgba(255, 46, 76, 0.15);
+    }
+    100% {
+        box-shadow:
+            0 0 34px rgba(255, 46, 76, 0.85),
+            inset 0 0 22px rgba(255, 46, 76, 0.3);
+    }
+}
+.animate-kop-select {
+    animation: kop-select-glow 0.28s ease-in-out infinite alternate;
+}
+
+@keyframes kop-scan {
+    0% {
+        transform: translateY(-110%);
+        opacity: 0;
+    }
+    25%,
+    75% {
+        opacity: 0.55;
+    }
+    100% {
+        transform: translateY(110%);
+        opacity: 0;
+    }
+}
+.animate-kop-scan {
+    animation: kop-scan 1.6s linear infinite;
+}
+
+@keyframes kop-rise {
+    0% {
+        transform: translateY(18px) scale(0.96);
+        opacity: 0;
+    }
+    100% {
+        transform: translateY(0) scale(1);
+        opacity: 1;
+    }
+}
+.animate-kop-rise {
+    animation: kop-rise 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes kop-marquee {
+    from {
+        transform: translateX(0);
+    }
+    to {
+        transform: translateX(-50%);
+    }
+}
+.animate-kop-marquee {
+    animation-name: kop-marquee;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    /* Paused until the component confirms the animation is applied, so a
+       random start offset never snaps back to frame zero. */
+    animation-play-state: paused;
+}
+.animate-kop-marquee.is-running {
+    animation-play-state: running;
+}
+
+.kop-mask-x {
+    -webkit-mask-image: linear-gradient(
+        to right,
+        transparent 0,
+        #000 5%,
+        #000 95%,
+        transparent 100%
+    );
+    mask-image: linear-gradient(
+        to right,
+        transparent 0,
+        #000 5%,
+        #000 95%,
+        transparent 100%
+    );
+}
+
+
+
+.kop-hide-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.kop-hide-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
 .kop-grid-bg {
     background-image:
         linear-gradient(rgba(255, 46, 76, 0.08) 1px, transparent 1px),

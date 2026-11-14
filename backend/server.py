@@ -405,6 +405,31 @@ class TournamentUpdate(BaseModel):
     qualifiers_per_group: Optional[int] = None
     status: Optional[str] = None
     default_duration_s: Optional[int] = None
+    # Presentation settings (additive). They never affect the tournament
+    # structure, so updating them is allowed after the draw.
+    home_mode: Optional[Literal["SELECT", "BANNER", "AUTO"]] = None
+    home_select_seconds: Optional[int] = None
+    home_banner_seconds: Optional[int] = None
+    draw_spin_seconds: Optional[float] = None
+    draw_pause_seconds: Optional[float] = None
+
+
+# Defaults for the additive presentation fields. Read-time only: existing
+# tournament documents are never rewritten by a migration.
+PRESENTATION_DEFAULTS = {
+    "home_mode": "SELECT",
+    "home_select_seconds": 15,
+    "home_banner_seconds": 10,
+    "draw_spin_seconds": 2.6,
+    "draw_pause_seconds": 6,
+}
+
+PRESENTATION_RANGES = {
+    "home_select_seconds": (5, 120),
+    "home_banner_seconds": (3, 120),
+    "draw_spin_seconds": (1, 10),
+    "draw_pause_seconds": (1, 30),
+}
 
 
 class DurationIn(BaseModel):
@@ -1006,6 +1031,7 @@ async def _ensure_test_session() -> dict:
             "default_duration_s": int(real_t.get("default_duration_s") or DEFAULT_DURATION_S),
             "live_mode": "MATCH", "live_match_id": None,
             "is_test": True, "created_at": now_iso(),
+            **PRESENTATION_DEFAULTS,
         }
         await db.tournament.insert_one(dict(t))
     return t
@@ -1258,6 +1284,9 @@ async def get_tournament():
     t["player_limit"] = cfg["capacity"]
     t["capacity"] = cfg["capacity"]
     t["qualifiers_total"] = cfg["qualifiers_total"]
+    # Additive presentation defaults for documents created before these fields.
+    for key, default in PRESENTATION_DEFAULTS.items():
+        t.setdefault(key, default)
     return t
 
 
@@ -1298,6 +1327,9 @@ async def update_tournament(body: TournamentUpdate, _=Depends(require_admin)):
         data["player_limit"] = capacity
 
     updates = {k: v for k, v in data.items() if v is not None}
+    for key, (low, high) in PRESENTATION_RANGES.items():
+        if key in updates:
+            updates[key] = min(high, max(low, updates[key]))
     # player_limit is derived from the structure; keep the stored value in sync.
     updates["player_limit"] = (
         (data.get("num_teams") or current["num_teams"]) *

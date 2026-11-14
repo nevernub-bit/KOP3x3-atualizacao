@@ -18,6 +18,7 @@ import Playoffs from "./pages/Playoffs";
 import Stats from "./pages/Stats";
 import Champion from "./pages/Champion";
 import Live from "./pages/Live";
+import DrawEvent from "./pages/DrawEvent";
 import Versus from "./pages/Versus";
 import Rules from "./pages/Rules";
 
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="/rules" element={withLayout(Rules)} />
           <Route path="/champion" element={withLayout(Champion)} />
           <Route path="/live" element={withLayout(Live, { hideNav: true })} />
+          <Route path="/draw" element={withLayout(DrawEvent, { hideNav: true })} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

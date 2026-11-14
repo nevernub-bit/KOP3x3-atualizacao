@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, formatErr, isTestMode, setTestMode } from "../api";
+import { api, formatErr, isTestMode, setTestMode, scopedLink } from "../api";
 import { useAuth } from "../auth";
 import { toast } from "sonner";
 import { sfx } from "../sound";
@@ -20,6 +20,7 @@ export default function Admin() {
   const [editing, setEditing] = useState(null);
   const [playerSearch, setPlayerSearch] = useState("");
   const [cfg, setCfg] = useState({ num_teams: 10, players_per_team: 3, num_groups: 2, qualifiers_per_group: 2 });
+  const [pres, setPres] = useState({ home_mode: "SELECT", home_select_seconds: 15, home_banner_seconds: 10, draw_spin_seconds: 2.6, draw_pause_seconds: 6 });
   const [confirmDraw, setConfirmDraw] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -39,8 +40,6 @@ export default function Admin() {
   const [historyBusy, setHistoryBusy] = useState(false);
   const [confirmRestore, setConfirmRestore] = useState(null);
   const [bracketStatus, setBracketStatus] = useState(null);
-  const [recalc, setRecalc] = useState(null);
-  const [confirmRecalc, setConfirmRecalc] = useState(false);
   // Registration approval + simulation panel
   const [statusFilter, setStatusFilter] = useState("TODOS");
   const [testMode, setLocalTestMode] = useState(isTestMode());
@@ -77,6 +76,13 @@ export default function Admin() {
       players_per_team: t.data?.players_per_team ?? 3,
       num_groups: t.data?.num_groups ?? 2,
       qualifiers_per_group: t.data?.qualifiers_per_group ?? 2,
+    });
+    setPres({
+      home_mode: t.data?.home_mode || "SELECT",
+      home_select_seconds: t.data?.home_select_seconds ?? 15,
+      home_banner_seconds: t.data?.home_banner_seconds ?? 10,
+      draw_spin_seconds: t.data?.draw_spin_seconds ?? 2.6,
+      draw_pause_seconds: t.data?.draw_pause_seconds ?? 6,
     });
   };
   useEffect(() => {
@@ -229,6 +235,21 @@ export default function Admin() {
     errorMessage: "Falha ao renomear equipe",
   });
 
+  // Presentation settings live in additive tournament fields, so saving them
+  // works even after the draw (no structural change, no player data touched).
+  const savePresentation = () => runAdminAction("presentation", async () => {
+    const r = await api.patch("/tournament", {
+      home_mode: pres.home_mode,
+      home_select_seconds: Number(pres.home_select_seconds),
+      home_banner_seconds: Number(pres.home_banner_seconds),
+      draw_spin_seconds: Number(pres.draw_spin_seconds),
+      draw_pause_seconds: Number(pres.draw_pause_seconds),
+    });
+    setTour(r.data);
+    sfx.save();
+    toast.success("Apresentação atualizada");
+  }, { refresh: false, errorMessage: "Falha ao salvar apresentação" });
+
   const selectBanner = (file) => {
     if (!file) return;
     if (!/^image\/(png|jpe?g|webp)$/.test(file.type)) {
@@ -326,23 +347,6 @@ export default function Admin() {
     }, { refresh: false, errorMessage: "Falha ao restaurar o snapshot" });
   };
 
-  const previewRecalc = () => runAdminAction("recalc-preview", async () => {
-    const r = await api.post("/admin/recalculate-scores", { dry_run: true, confirm: true });
-    setRecalc(r.data);
-    toast.success(`${r.data.count} partida(s) com diferença`);
-    return r;
-  }, { refresh: false, errorMessage: "Falha ao pré-visualizar o recálculo" });
-
-  const applyRecalc = () => {
-    setConfirmRecalc(false);
-    return runAdminAction("recalc-apply", async () => {
-      const r = await api.post("/admin/recalculate-scores", { dry_run: false, confirm: true });
-      setRecalc(r.data);
-      toast.success(`${r.data.applied} partida(s) recalculada(s) — anteriores arquivadas`);
-      return r;
-    }, { errorMessage: "Falha ao recalcular os resultados" });
-  };
-
   const setLiveMode = (nextMode) => runAdminAction("live-mode", () => api.post("/live/state", { mode: nextMode }), {
     refresh: false,
     onSuccess: r => {
@@ -413,7 +417,7 @@ export default function Admin() {
             className="ml-auto kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2 flex items-center gap-2 kop-glow-red">
             <SkipForward className="w-4 h-4" /> Carregar Próxima Partida
           </button>
-          <Link to="/live" target="_blank" data-testid="open-live-tab"
+          <Link to={scopedLink("/live")} target="_blank" data-testid="open-live-tab"
             className="kop-chamfer border-2 border-cyan-500 text-cyan-300 hover:bg-cyan-500 hover:text-black font-arcade uppercase tracking-widest px-4 py-2 transition">
             Abrir Telão
           </Link>
@@ -564,6 +568,10 @@ export default function Admin() {
               <Shuffle className="w-4 h-4" /> Sortear Equipes
             </button>
           )}
+          <Link to={scopedLink("/draw")} target="_blank" data-testid="open-draw-event"
+            className="kop-chamfer border-2 border-amber-500 text-amber-300 hover:bg-amber-500 hover:text-black font-arcade uppercase tracking-widest px-4 py-2 transition">
+            Abrir Apresentação
+          </Link>
           <Link to="/team-select" className="kop-chamfer border-2 border-cyan-500 text-cyan-300 hover:bg-cyan-500 hover:text-black font-arcade uppercase tracking-widest px-4 py-2 transition">
             Ver Team Select
           </Link>
@@ -805,49 +813,59 @@ export default function Admin() {
       </section>
 
       <section className="bg-black/60 border-2 border-red-500/30 kop-chamfer p-5">
-        <div className="flex items-center gap-2 mb-2">
-          <RefreshCw className="w-5 h-5 text-red-400" />
-          <h2 className="font-display text-xl text-white uppercase tracking-widest">Recalcular Resultados (Regra v2)</h2>
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          <Tv className="w-5 h-5 text-red-400" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Apresentação</h2>
+          <Link to={scopedLink("/draw")} target="_blank" className="ml-auto font-display text-[10px] uppercase tracking-widest text-cyan-300 hover:text-white border border-cyan-700 px-2 py-1">
+            Abrir apresentação do sorteio →
+          </Link>
         </div>
-        <p className="text-[11px] text-slate-400 font-display uppercase tracking-widest mb-3">
-          1 ponto por eliminação + 2 de bônus. Cada resultado anterior é arquivado no histórico antes de mudar.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <button onClick={previewRecalc} disabled={actionBusy}
-            className="kop-chamfer border-2 border-cyan-500 text-cyan-300 font-arcade uppercase tracking-widest px-4 py-2 disabled:opacity-50">
-            {pendingAction === "recalc-preview" ? "Verificando..." : "Pré-visualizar"}
-          </button>
-          <button onClick={() => setConfirmRecalc(true)} disabled={actionBusy}
-            className="kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-4 py-2 disabled:opacity-50">
-            Aplicar com backup
-          </button>
+        <div className="grid sm:grid-cols-3 gap-3">
+          {[
+            { key: "SELECT", label: "Modo A", desc: "Character Select" },
+            { key: "BANNER", label: "Modo B", desc: "Banner" },
+            { key: "AUTO", label: "Modo C", desc: "Alternância automática" },
+          ].map((m) => (
+            <button key={m.key} data-testid={`home-mode-${m.key}`} onClick={() => setPres((p) => ({ ...p, home_mode: m.key }))}
+              disabled={actionBusy}
+              className={`kop-chamfer border-2 p-3 text-left transition disabled:opacity-50 ${pres.home_mode === m.key ? "border-red-500 bg-red-500/10 text-white" : "border-slate-700 text-slate-400 hover:text-white"}`}>
+              <div className="font-mono-num text-[9px] uppercase tracking-[0.3em] text-slate-500">{m.label}</div>
+              <div className="font-display uppercase tracking-widest text-sm">{m.desc}</div>
+            </button>
+          ))}
         </div>
-        {confirmRecalc && (
-          <div className="mt-3 border border-amber-500/60 kop-chamfer p-3 flex flex-wrap items-center gap-2">
-            <span className="text-[11px] text-amber-300 font-display uppercase tracking-widest">
-              Confirmar recálculo? Os resultados anteriores serão arquivados e poderão ser restaurados.
-            </span>
-            <button onClick={applyRecalc} disabled={actionBusy}
-              className="kop-chamfer bg-red-600 hover:bg-red-500 text-white font-arcade uppercase tracking-widest px-3 py-2 disabled:opacity-50">
-              {pendingAction === "recalc-apply" ? "Recalculando..." : "Confirmar"}
-            </button>
-            <button onClick={() => setConfirmRecalc(false)} disabled={actionBusy}
-              className="kop-chamfer border-2 border-slate-700 text-slate-400 px-3 py-2">
-              Cancelar
-            </button>
-          </div>
-        )}
-        {recalc && (
-          <div className="mt-3 text-xs text-slate-300 font-mono-num">
-            {recalc.dry_run ? `${recalc.count} partida(s) com diferença` : `${recalc.applied} partida(s) recalculada(s)`}
-            {(recalc.changes || []).slice(0, 8).map(c => (
-              <div key={c.match_id} className="text-[11px] text-slate-400">
-                #{c.number}: {c.before.points_a}·{c.before.points_b} → {c.after.points_a}·{c.after.points_b}
-              </div>
-            ))}
-          </div>
-        )}
+        <div className="mt-3 grid sm:grid-cols-4 gap-3 text-xs">
+          <label className="block">
+            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Select (s)</span>
+            <input type="number" min="5" max="120" value={pres.home_select_seconds} disabled={actionBusy}
+              onChange={(e) => setPres((p) => ({ ...p, home_select_seconds: e.target.value }))}
+              className="mt-1 w-full bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1 text-white" />
+          </label>
+          <label className="block">
+            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Banner (s)</span>
+            <input type="number" min="3" max="120" value={pres.home_banner_seconds} disabled={actionBusy}
+              onChange={(e) => setPres((p) => ({ ...p, home_banner_seconds: e.target.value }))}
+              className="mt-1 w-full bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1 text-white" />
+          </label>
+          <label className="block">
+            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Giro do sorteio (s)</span>
+            <input type="number" min="1" max="10" step="0.2" value={pres.draw_spin_seconds} disabled={actionBusy}
+              onChange={(e) => setPres((p) => ({ ...p, draw_spin_seconds: e.target.value }))}
+              className="mt-1 w-full bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1 text-white" />
+          </label>
+          <label className="block">
+            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Pausa entre sorteios (s)</span>
+            <input type="number" min="1" max="30" step="0.5" value={pres.draw_pause_seconds} disabled={actionBusy}
+              onChange={(e) => setPres((p) => ({ ...p, draw_pause_seconds: e.target.value }))}
+              className="mt-1 w-full bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1 text-white" />
+          </label>
+        </div>
+        <button onClick={savePresentation} disabled={actionBusy}
+          className="mt-3 kop-chamfer bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-arcade uppercase tracking-widest px-4 py-2 inline-flex items-center gap-2">
+          <Save className="w-4 h-4" /> {pendingAction === "presentation" ? "Salvando..." : "Salvar apresentação"}
+        </button>
       </section>
+
       <section className="bg-black/60 border-2 border-amber-500/40 kop-chamfer p-5">
         <div className="flex items-center gap-2 mb-3">
           <ImageIcon className="w-5 h-5 text-amber-400" />
