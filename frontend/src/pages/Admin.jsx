@@ -822,27 +822,44 @@ export default function Admin() {
         </div>
         <div className="grid sm:grid-cols-3 gap-3">
           {[
-            { key: "SELECT", label: "Modo A", desc: "Character Select" },
-            { key: "BANNER", label: "Modo B", desc: "Banner" },
-            { key: "AUTO", label: "Modo C", desc: "Alternância automática" },
+            {
+              key: "SELECT", label: "Modo A", desc: "Character Select",
+              what: "Só participantes: faixa em movimento + grade com todos os confirmados na tela.",
+              when: "Use na apresentação dos jogadores. Não exibe banner.",
+            },
+            {
+              key: "BANNER", label: "Modo B", desc: "Banner",
+              what: "Só identidade: banner grande do KOP com a marca do evento.",
+              when: "Use para chamar o público. Não exibe a grade de participantes.",
+            },
+            {
+              key: "AUTO", label: "Modo C", desc: "Alternância automática",
+              what: "Alterna A e B nos tempos configurados abaixo.",
+              when: "Use no telão: jogadores, banner, jogadores, banner…",
+            },
           ].map((m) => (
             <button key={m.key} data-testid={`home-mode-${m.key}`} onClick={() => setPres((p) => ({ ...p, home_mode: m.key }))}
               disabled={actionBusy}
               className={`kop-chamfer border-2 p-3 text-left transition disabled:opacity-50 ${pres.home_mode === m.key ? "border-red-500 bg-red-500/10 text-white" : "border-slate-700 text-slate-400 hover:text-white"}`}>
               <div className="font-mono-num text-[9px] uppercase tracking-[0.3em] text-slate-500">{m.label}</div>
               <div className="font-display uppercase tracking-widest text-sm">{m.desc}</div>
+              <div className="mt-1.5 text-[11px] leading-snug text-slate-400 normal-case font-sans">{m.what}</div>
+              <div className="mt-1 text-[11px] leading-snug text-slate-500 normal-case font-sans">{m.when}</div>
             </button>
           ))}
         </div>
+        <p className="mt-2 text-[11px] text-slate-500 font-sans">
+          Os tempos abaixo só valem no Modo C. Nos modos A e B a Home fica fixa na composição escolhida.
+        </p>
         <div className="mt-3 grid sm:grid-cols-4 gap-3 text-xs">
           <label className="block">
-            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Select (s)</span>
+            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Tempo no Select (s)</span>
             <input type="number" min="5" max="120" value={pres.home_select_seconds} disabled={actionBusy}
               onChange={(e) => setPres((p) => ({ ...p, home_select_seconds: e.target.value }))}
               className="mt-1 w-full bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1 text-white" />
           </label>
           <label className="block">
-            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Banner (s)</span>
+            <span className="text-slate-500 uppercase text-[10px] font-display tracking-widest">Tempo no Banner (s)</span>
             <input type="number" min="3" max="120" value={pres.home_banner_seconds} disabled={actionBusy}
               onChange={(e) => setPres((p) => ({ ...p, home_banner_seconds: e.target.value }))}
               className="mt-1 w-full bg-slate-900 border border-slate-700 focus:border-red-500 px-2 py-1 text-white" />

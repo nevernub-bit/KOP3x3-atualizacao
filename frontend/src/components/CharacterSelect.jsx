@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 const LEVEL_STYLES = {
   "INICIANTE": "bg-blue-500/25 text-blue-200 border-blue-400/70",
@@ -12,7 +12,7 @@ const pad2 = (n) => String(n).padStart(2, "0");
  * One "character" card. Pure presentation: it only reads the player object
  * that already exists in the API payload — never writes anything.
  */
-export function SelectCard({ player, index, state = "idle", rounded = false, testId }) {
+export function SelectCard({ player, index, state = "idle", rounded = false, testId, style, nameSize, metaSize }) {
   const highlight = state === "highlight";
   const selected = state === "selected";
   const dimmed = state === "dimmed";
@@ -28,7 +28,7 @@ export function SelectCard({ player, index, state = "idle", rounded = false, tes
       data-testid={testId}
       data-state={state}
       className={`relative kop-chamfer border-2 overflow-hidden bg-slate-950 transition-all duration-150 ${rounded ? "rounded-md" : ""} ${frame} ${dimmed ? "opacity-40 saturate-50" : ""}`}
-      style={{ aspectRatio: "3 / 4" }}
+      style={{ aspectRatio: style?.width && style?.height ? undefined : "3 / 4", ...style }}
     >
       {player?.photo ? (
         <img
@@ -44,7 +44,10 @@ export function SelectCard({ player, index, state = "idle", rounded = false, tes
 
       <div className="absolute inset-0 bg-gradient-to-t from-black via-black/45 to-transparent" />
 
-      <div className="absolute top-1 left-1 font-mono-num text-[9px] sm:text-[10px] tracking-widest text-white/80 bg-black/70 px-1 py-0.5 border border-white/10">
+      <div
+        className="absolute top-1 left-1 font-mono-num text-[9px] sm:text-[10px] tracking-widest text-white/80 bg-black/70 px-1 py-0.5 border border-white/10"
+        style={metaSize ? { fontSize: metaSize, padding: "0 2px", lineHeight: 1.3 } : undefined}
+      >
         P{pad2((index ?? 0) + 1)}
       </div>
 
@@ -55,11 +58,17 @@ export function SelectCard({ player, index, state = "idle", rounded = false, tes
       )}
 
       <div className="absolute bottom-0 inset-x-0 px-1.5 pb-1.5 pt-3">
-        <div className="font-display text-[11px] sm:text-sm leading-tight text-white uppercase truncate">
+        <div
+          className="font-display text-[11px] sm:text-sm leading-tight text-white uppercase truncate"
+          style={nameSize ? { fontSize: nameSize, lineHeight: 1.05 } : undefined}
+        >
           {player?.name || "—"}
         </div>
         {player?.nickname && (
-          <div className="font-mono-num text-[8px] sm:text-[9px] text-cyan-300 uppercase tracking-widest truncate">
+          <div
+            className="font-mono-num text-[8px] sm:text-[9px] text-cyan-300 uppercase tracking-widest truncate"
+            style={metaSize ? { fontSize: metaSize, lineHeight: 1.15 } : undefined}
+          >
             "{player.nickname}"
           </div>
         )}
@@ -251,6 +260,119 @@ export function PlayerSelectStrip({ players = [], className = "" }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Best fit for `n` cards of aspect 3/4 inside a `W × H` box: tries every column
+ * count and keeps the one with the largest card that still fits both axes.
+ */
+export function fitGrid(n, W, H, gap = 8, maxCardWidth = 190) {
+  const empty = { cols: 1, rows: 1, cardW: 0, cardH: 0 };
+  if (!n || W <= 0 || H <= 0) return empty;
+  let best = empty;
+  let bestArea = 0;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const cellW = (W - gap * (cols - 1)) / cols;
+    const cellH = (H - gap * (rows - 1)) / rows;
+    if (cellW <= 0 || cellH <= 0) continue;
+    const cardW = Math.min(cellW, cellH * (3 / 4), maxCardWidth);
+    const cardH = cardW * (4 / 3);
+    if (cardH * rows + gap * (rows - 1) > H + 0.5) continue;
+    const area = cardW * cardH;
+    if (area > bestArea) { bestArea = area; best = { cols, rows, cardW, cardH }; }
+  }
+  return best;
+}
+
+/**
+ * Arcade "character select" wall: every participant visible at once.
+ *
+ * The card size is computed from the box it lives in, so 8 and 30 players both
+ * fill the screen without a vertical scrollbar. Only the highlighted card grows,
+ * in place, and it can never push the others out of the box.
+ */
+export function PlayerSelectWall({
+  players = [],
+  highlightId = null,
+  selectedId = null,
+  revealCount = null,
+  gap = 8,
+  maxCardWidth = 190,
+  className = "",
+  testId = "player-select-wall",
+}) {
+  const boxRef = useRef(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      setBox({ w: rect.width, h: rect.height });
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // Re-observes when the roster arrives: the first render happens before the
+    // players load, when the measured box does not exist yet.
+  }, [players.length]);
+
+  const layout = useMemo(
+    () => fitGrid(players.length, box.w, box.h, gap, maxCardWidth),
+    [players.length, box.w, box.h, gap, maxCardWidth],
+  );
+
+  if (!players.length) {
+    return (
+      <div className="text-center py-10 font-display uppercase tracking-[0.4em] text-slate-500 text-xs sm:text-sm">
+        Aguardando inscrições…
+      </div>
+    );
+  }
+
+  const ready = layout.cardW > 0;
+  const nameSize = Math.max(7.5, Math.min(13, layout.cardW * 0.125));
+  const metaSize = Math.max(6, Math.min(9.5, layout.cardW * 0.085));
+
+  return (
+    <div
+      ref={boxRef}
+      data-testid={testId}
+      data-cols={layout.cols}
+      className={`w-full h-full flex items-center justify-center overflow-hidden ${className}`}
+    >
+      {ready && (
+        <div
+          className="flex flex-wrap justify-center content-center"
+          style={{ gap, maxWidth: layout.cols * (layout.cardW + gap) }}
+        >
+          {players.map((p, i) => {
+            const shown = revealCount == null || i < revealCount;
+            const state = selectedId === p.id ? "selected" : highlightId === p.id ? "highlight" : shown ? "idle" : "dimmed";
+            return (
+              <SelectCard
+                key={p.id}
+                player={p}
+                index={i}
+                state={state}
+                testId={`wall-card-${p.id}`}
+                style={{ width: layout.cardW, height: layout.cardH }}
+                nameSize={nameSize}
+                metaSize={metaSize}
+              />
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { PlayerSelectStrip } from "../components/CharacterSelect";
+import { PlayerSelectStrip, PlayerSelectWall } from "../components/CharacterSelect";
 import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv, BookOpen } from "lucide-react";
 
 const ITEMS = [
@@ -32,7 +32,8 @@ export default function Home() {
   const [players, setPlayers] = useState([]);
   const [cfg, setCfg] = useState(null);
   const [playersReady, setPlayersReady] = useState(false);
-  const [phase, setPhase] = useState("SELECT");
+  // SELECT = participants only · BANNER = KOP identity only · AUTO = both, timed.
+  const [stage, setStage] = useState("SELECT");
 
   // One load per visit. The players endpoint answers 304 when nothing changed,
   // so returning visitors do not download the same photos again.
@@ -56,78 +57,119 @@ export default function Home() {
   const selectSeconds = Math.max(5, Number(cfg?.home_select_seconds ?? 15));
   const bannerSeconds = Math.max(3, Number(cfg?.home_banner_seconds ?? 10));
 
-  // Presentation mode only decides where the banner sits. Without a banner
-  // there is nothing to rotate to, so it stays on the roster.
+  // Only AUTO rotates. SELECT and BANNER are fixed compositions, which is the
+  // whole point of the three modes: one is about the players, the other about
+  // the KOP identity.
   useEffect(() => {
     if (!playersReady) return;
-    if (mode !== "AUTO" || !banner) {
-      setPhase(mode === "BANNER" && banner ? "BANNER" : "SELECT");
-      return;
+    if (mode !== "AUTO") {
+      setStage(mode === "BANNER" ? "BANNER" : "SELECT");
+      return undefined;
     }
     let current = "SELECT";
     let timer = null;
-    setPhase(current);
+    setStage(current);
     const schedule = () => {
       const waitFor = current === "SELECT" ? selectSeconds : bannerSeconds;
       timer = setTimeout(() => {
         current = current === "SELECT" ? "BANNER" : "SELECT";
-        setPhase(current);
+        setStage(current);
         schedule();
       }, waitFor * 1000);
     };
     schedule();
     return () => clearTimeout(timer);
-  }, [mode, banner, selectSeconds, bannerSeconds, playersReady]);
+  }, [mode, selectSeconds, bannerSeconds, playersReady]);
 
-  const showHeroBanner = phase === "BANNER" && !!banner;
-  const showFooterBanner = !!banner && !showHeroBanner;
+  const showingBanner = stage === "BANNER";
+  const eventLine = cfg
+    ? `${cfg.num_teams ?? "—"} equipes · ${cfg.players_per_team ?? "—"} jogadores por equipe · ${cfg.capacity ?? "—"} vagas`
+    : "3 players · 1 team · 1 champion";
 
   return (
     <div className="relative overflow-hidden">
       <div className="absolute inset-0 kop-grid-bg opacity-30 pointer-events-none" />
 
       <div className="relative max-w-6xl mx-auto px-4 py-8 sm:py-12">
-        <div className="text-center mb-6 sm:mb-8">
-          <div className="font-display text-[10px] sm:text-sm tracking-[0.4em] text-cyan-300 uppercase mb-2">
-            Arcade Paintball Tournament
-          </div>
-          <h1 data-testid="home-title" className="font-arcade text-3xl sm:text-5xl lg:text-6xl text-red-500 uppercase animate-kop-pulse leading-none">
-            Kings of Paintball
-          </h1>
-          <div className="font-display text-xl sm:text-3xl text-slate-100 tracking-widest mt-2">
-            KOP 3<span className="text-red-500">×</span>3
-          </div>
-          <p className="mt-3 font-display text-[10px] sm:text-xs tracking-[0.45em] text-slate-500 uppercase">
-            3 Players · 1 Team · 1 Champion
-          </p>
-        </div>
-
-        {showHeroBanner && (
-          <div className="mb-8 flex justify-center animate-kop-slam">
-            <img
-              src={banner}
-              alt="Banner do evento"
-              data-testid="home-banner"
-              className="max-h-72 w-auto max-w-full object-contain border-2 border-red-900/60 kop-chamfer"
-            />
-          </div>
-        )}
-
-        {players.length > 0 && (
-          <section data-testid="player-select" className="mb-7">
-            <div className="flex items-baseline justify-between gap-2 mb-1 px-1">
-              <span className="font-display text-[9px] sm:text-[10px] tracking-[0.4em] text-red-400 uppercase">
-                KOP 3×3 — Player Select
-              </span>
-              <span className="font-mono-num text-[9px] text-slate-500 uppercase tracking-widest">
-                {players.length} inscritos
-              </span>
+        {showingBanner ? (
+          /* ---------- MODO B: identidade KOP ---------- */
+          <section data-testid="home-banner-mode" className="animate-kop-rise">
+            <div className="text-center mb-4">
+              <div className="font-display text-[10px] tracking-[0.45em] text-cyan-300 uppercase">Kings of Paintball</div>
+              <h1 data-testid="home-title" className="font-arcade text-2xl sm:text-4xl text-red-500 uppercase animate-kop-pulse leading-none mt-1">
+                KOP 3<span className="text-white">×</span>3
+              </h1>
             </div>
-            <PlayerSelectStrip players={players} />
+
+            <div className="relative kop-chamfer border-2 border-red-900/60 bg-black overflow-hidden">
+              <div className="pointer-events-none absolute inset-0 kop-diag-bg opacity-20" />
+              {banner ? (
+                <div className="flex items-center justify-center">
+                  <img
+                    src={banner}
+                    alt="Banner do evento"
+                    data-testid="home-banner"
+                    className="max-h-[56vh] w-auto max-w-full object-contain"
+                  />
+                </div>
+              ) : (
+                <div className="relative flex flex-col items-center justify-center gap-3 py-14 px-6">
+                  <img src={`${process.env.PUBLIC_URL || ""}/kop-logo.png`} alt="KOP" className="w-20 h-20 sm:w-24 sm:h-24" />
+                  <div className="font-arcade text-3xl sm:text-5xl text-white uppercase leading-none">
+                    KINGS OF PAINTBALL
+                  </div>
+                  <div className="font-display text-[11px] tracking-[0.5em] text-amber-300 uppercase">
+                    KOP 3×3 — Evento oficial
+                  </div>
+                </div>
+              )}
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 px-4 pb-3 pt-8 bg-gradient-to-t from-black via-black/70 to-transparent">
+                <div className="font-display text-[10px] sm:text-xs tracking-[0.4em] text-white/85 uppercase">
+                  KOP 3×3 — Kings of Paintball
+                </div>
+                <div className="font-mono-num text-[10px] text-cyan-300 uppercase tracking-widest">{eventLine}</div>
+              </div>
+            </div>
+          </section>
+        ) : (
+          /* ---------- MODO A: Character Select ---------- */
+          <section data-testid="home-select-mode">
+            <div className="text-center mb-5">
+              <div className="font-display text-[10px] tracking-[0.45em] text-cyan-300 uppercase">Arcade Paintball Tournament</div>
+              <h1 data-testid="home-title" className="font-arcade text-3xl sm:text-5xl text-red-500 uppercase animate-kop-pulse leading-none mt-1">
+                Kings of Paintball
+              </h1>
+            </div>
+
+            {players.length > 0 ? (
+              <>
+                <div className="mb-7" data-testid="player-select">
+                  <div className="flex items-baseline justify-between gap-2 mb-1 px-1">
+                    <span className="font-display text-[9px] sm:text-[10px] tracking-[0.4em] text-red-400 uppercase">
+                      KOP 3×3 — Player Select
+                    </span>
+                    <span className="font-mono-num text-[9px] text-slate-500 uppercase tracking-widest">
+                      {players.length} inscritos
+                    </span>
+                  </div>
+                  <PlayerSelectStrip players={players} />
+                </div>
+
+                <div data-testid="home-player-wall" className="kop-chamfer border border-slate-800/70 bg-black/40 p-2 sm:p-3">
+                  <div className="h-[min(46vh,420px)] min-h-[240px]">
+                    <PlayerSelectWall players={players} maxCardWidth={132} gap={6} />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="text-center font-display text-xs uppercase tracking-[0.4em] text-slate-500">
+                Aguardando inscrições confirmadas
+              </p>
+            )}
           </section>
         )}
 
-        <div className="mt-2 flex flex-col sm:flex-row gap-3 justify-center">
+        <div className="mt-7 flex flex-col sm:flex-row gap-3 justify-center">
           <Link
             to="/register"
             data-testid="home-cta-register"
@@ -161,23 +203,6 @@ export default function Home() {
             );
           })}
         </div>
-
-        {showFooterBanner && (
-          <section data-testid="home-banner-section" className="mt-12 mb-2">
-            <div className="text-center mb-3">
-              <div className="font-display text-[10px] tracking-[0.4em] text-amber-400 uppercase">Evento</div>
-              <div className="font-arcade text-sm sm:text-base text-white uppercase tracking-widest">KOP 3×3</div>
-            </div>
-            <div className="flex justify-center animate-kop-rise">
-              <img
-                src={banner}
-                alt="Banner do evento"
-                data-testid="home-banner"
-                className="max-h-64 w-auto max-w-full object-contain border-2 border-red-900/60 kop-chamfer"
-              />
-            </div>
-          </section>
-        )}
       </div>
     </div>
   );

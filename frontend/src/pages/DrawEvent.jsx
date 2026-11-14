@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import { api, formatErr } from "../api";
+import { api, formatErr, isTestMode } from "../api";
 import { useAuth } from "../auth";
-import { PlayerRoster } from "../components/CharacterSelect";
+import { PlayerSelectWall } from "../components/CharacterSelect";
+import {
+  buildDrawPdf, drawIsRecordable, downloadPdf, canSharePdf, sharePdf, loadKopLogo,
+} from "../lib/drawPdf";
 import { sfx } from "../sound";
 import {
   Play, Pause, RotateCcw, Shuffle, Shield, ArrowLeft, SlidersHorizontal, Users, Timer,
+  FileDown, Share2, Download,
 } from "lucide-react";
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -74,6 +78,16 @@ export default function DrawEvent() {
   const [drawMode, setDrawMode] = useState("BALANCED");
   const [timing, setTiming] = useState({ spin: 2.6, pause: 6 });
   const [savingTiming, setSavingTiming] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfFile, setPdfFile] = useState(null);
+
+  // The teams panel follows the draw on its own: the active team is centred in
+  // the list, so the operator never scrolls it by hand.
+  const teamsListRef = useRef(null);
+  const teamNodesRef = useRef(new Map());
+  // Breathing room above the first team and below the last one, so even the
+  // first team can sit in the centre instead of being pinned to the top.
+  const [teamPad, setTeamPad] = useState({ top: 0, bottom: 0 });
 
   const runRef = useRef(0);
   const pausedRef = useRef(false);
@@ -293,8 +307,7 @@ export default function DrawEvent() {
     }
   };
 
-  const saveTiming = async () => {
-    if (savingTiming) return;
+  const saveTiming = async () => {    if (savingTiming) return;
     setSavingTiming(true);
     try {
       const r = await api.patch("/tournament", {
@@ -308,6 +321,85 @@ export default function DrawEvent() {
     } finally {
       setSavingTiming(false);
     }
+  };
+
+  const orderedTeams = useMemo(() => [...teams].sort(byOrder), [teams]);
+
+  // Keeps the team being drawn centred in the rolling list (and the previous
+  // one visible above it). No manual scrolling during the event.
+  const activeTeamId = revealed ? current?.teamId || null : null;
+  useEffect(() => {
+    const list = teamsListRef.current;
+    const node = activeTeamId ? teamNodesRef.current.get(activeTeamId) : null;
+    if (!list || !node) return;
+    const top = node.offsetTop - (list.clientHeight - node.offsetHeight) / 2;
+    list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  }, [activeTeamId, index, revealed, teamPad]);
+
+  // The spacers depend on how tall the list and its cards actually are, so they
+  // are measured after layout and whenever the panel changes size.
+  useEffect(() => {
+    const list = teamsListRef.current;
+    if (!list || !orderedTeams.length) return undefined;
+    const update = () => {
+      const first = teamNodesRef.current.get(orderedTeams[0]?.id);
+      const last = teamNodesRef.current.get(orderedTeams[orderedTeams.length - 1]?.id);
+      const height = (node) => (node ? node.offsetHeight : 0);
+      setTeamPad({
+        top: Math.max(0, Math.round((list.clientHeight - height(first)) / 2)),
+        bottom: Math.max(0, Math.round((list.clientHeight - height(last)) / 2)),
+      });
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(update);
+    ro.observe(list);
+    return () => ro.disconnect();
+    // `phase` is a dependency because the panel is remounted between the waiting
+    // screen and the live draw: without it the observer would stay attached to
+    // the previous node and the spacers would keep their first (zero) measure.
+  }, [orderedTeams, perTeam, phase]);
+
+  // The PDF is built from the result the API just returned, never from what is
+  // on screen. Generating it writes nothing and never redraws the teams.
+  const generatePdf = async () => {
+    if (pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const [t, tm, p, m] = await Promise.all([
+        api.get("/tournament"),
+        api.get("/teams"),
+        api.get("/players?photos=false"),
+        api.get("/matches"),
+      ]);
+      if (!drawIsRecordable({ tournament: t.data, teams: tm.data, players: p.data })) {
+        toast.error("Nenhum sorteio salvo para registrar em PDF");
+        return;
+      }
+      const logo = await loadKopLogo();
+      const { blob, filename } = buildDrawPdf({
+        tournament: t.data,
+        teams: tm.data,
+        players: p.data,
+        matches: m.data,
+        logo,
+        scope: isTestMode() ? "TEST" : "REAL",
+      });
+      setPdfFile({ blob, filename });
+      downloadPdf(blob, filename);
+      sfx.confirm();
+      toast.success("PDF do sorteio gerado");
+    } catch (e) {
+      toast.error(formatErr(e?.response?.data?.detail) || "Falha ao gerar o PDF do sorteio");
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  const shareRecord = async () => {
+    if (!pdfFile) return;
+    const sent = await sharePdf(pdfFile.blob, pdfFile.filename, "KOP 3x3 - Resultado oficial do sorteio");
+    if (!sent) toast.error("Compartilhamento indisponível aqui - use o download do PDF");
   };
 
   const waiting = phase === "waiting" && !tour?.draw_done;
@@ -461,12 +553,15 @@ export default function DrawEvent() {
             )}
 
             {phase === "roster" && (
-              <div className="relative w-full px-3 sm:px-6 py-5">
-                <div className="text-center mb-4">
+              <div className="relative w-full px-3 sm:px-5 pt-4 pb-5">
+                <div className="text-center mb-3">
                   <div className="font-display text-[10px] tracking-[0.45em] text-red-400 uppercase">Player Select</div>
-                  <div className="font-arcade text-xl sm:text-3xl text-white uppercase">{players.length} jogadores confirmados</div>
+                  <div className="font-arcade text-lg sm:text-2xl text-white uppercase">{players.length} jogadores confirmados</div>
                 </div>
-                <PlayerRoster players={roster} dense revealCount={revealCount} />
+                {/* Every participant on screen at once: no vertical scroll. */}
+                <div className="h-[calc(100dvh-390px)] min-h-[280px]">
+                  <PlayerSelectWall players={roster} revealCount={revealCount} maxCardWidth={172} />
+                </div>
               </div>
             )}
 
@@ -498,13 +593,39 @@ export default function DrawEvent() {
                   revealedIds={new Set(t.players || [])} testId={`final-team-${t.id}`} />
               ))}
             </div>
-            {isAdmin && (
-              <div className="text-center mt-6">
-                <button onClick={startShow} className="kop-chamfer border-2 border-red-600 text-red-300 hover:bg-red-600 hover:text-white px-5 py-2 font-arcade uppercase tracking-widest text-sm inline-flex items-center gap-2">
+            <div className="mt-6 flex flex-col sm:flex-row flex-wrap items-center justify-center gap-2 sm:gap-3">
+              <button
+                onClick={generatePdf}
+                disabled={pdfBusy}
+                data-testid="draw-pdf-btn"
+                className="kop-chamfer bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-black px-5 py-2.5 font-arcade uppercase tracking-widest text-sm inline-flex items-center gap-2"
+              >
+                <FileDown className="w-4 h-4" /> {pdfBusy ? "Gerando PDF…" : "Gerar PDF do sorteio"}
+              </button>
+              {pdfFile && (
+                <button
+                  onClick={() => downloadPdf(pdfFile.blob, pdfFile.filename)}
+                  data-testid="draw-pdf-download"
+                  className="kop-chamfer border-2 border-cyan-600 text-cyan-300 hover:bg-cyan-500 hover:text-black px-4 py-2.5 font-arcade uppercase tracking-widest text-sm inline-flex items-center gap-2"
+                >
+                  <Download className="w-4 h-4" /> Baixar PDF
+                </button>
+              )}
+              {pdfFile && canSharePdf(pdfFile.blob, pdfFile.filename) && (
+                <button
+                  onClick={shareRecord}
+                  data-testid="draw-pdf-share"
+                  className="kop-chamfer border-2 border-slate-600 text-slate-200 hover:bg-slate-700 px-4 py-2.5 font-arcade uppercase tracking-widest text-sm inline-flex items-center gap-2"
+                >
+                  <Share2 className="w-4 h-4" /> Compartilhar PDF
+                </button>
+              )}
+              {isAdmin && (
+                <button onClick={startShow} className="kop-chamfer border-2 border-red-600 text-red-300 hover:bg-red-600 hover:text-white px-5 py-2.5 font-arcade uppercase tracking-widest text-sm inline-flex items-center gap-2">
                   <Play className="w-4 h-4" /> Repetir apresentação
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </section>
         ) : (
           <div className="grid lg:grid-cols-[1fr_320px] gap-4 sm:gap-6">
@@ -525,11 +646,12 @@ export default function DrawEvent() {
                 {phase === "playing" && (
                   <div className="absolute inset-x-0 top-0 h-1.5 bg-gradient-to-r from-transparent via-red-500 to-transparent animate-kop-pulse" />
                 )}
-                <div className="relative">
-                  <PlayerRoster
+                <div className="relative h-[calc(100dvh-360px)] min-h-[300px]">
+                  <PlayerSelectWall
                     players={roster}
                     highlightId={revealed ? current?.pid : highlightId}
                     selectedId={revealed ? current?.pid : null}
+                    maxCardWidth={150}
                   />
                 </div>
 
@@ -543,24 +665,24 @@ export default function DrawEvent() {
               </div>
 
               {revealed && current && (
-                <div key={`${current.pid}-${index}`} className="mt-4 animate-kop-slam">
-                  <div className="kop-chamfer border-2 border-yellow-400 kop-glow-gold bg-black/85 p-3 sm:p-5 flex items-center gap-4">
-                    <div className="w-20 h-24 sm:w-24 sm:h-28 shrink-0 border-2 border-yellow-400/70 overflow-hidden bg-slate-900">
+                <div key={`${current.pid}-${index}`} className="mt-2 animate-kop-slam">
+                  <div className="kop-chamfer border-2 border-yellow-400 kop-glow-gold bg-black/85 p-2.5 sm:p-3 flex items-center gap-3">
+                    <div className="w-14 h-[68px] sm:w-16 sm:h-20 shrink-0 border-2 border-yellow-400/70 overflow-hidden bg-slate-900">
                       {currentPlayer?.photo
                         ? <img src={currentPlayer.photo} alt={currentPlayer?.name || "Jogador"} className="h-full w-full object-cover" />
                         : <div className="h-full w-full flex items-center justify-center font-arcade text-slate-600">?</div>}
                     </div>
                     <div className="min-w-0">
-                      <div className="font-display text-[9px] sm:text-[11px] tracking-[0.45em] text-yellow-300 uppercase">Player selected</div>
-                      <div className="font-arcade text-lg sm:text-3xl text-white uppercase leading-tight truncate">
+                      <div className="font-display text-[9px] sm:text-[10px] tracking-[0.45em] text-yellow-300 uppercase">Player selected</div>
+                      <div className="font-arcade text-base sm:text-2xl text-white uppercase leading-tight truncate">
                         {currentPlayer?.name || "—"}
                       </div>
                       {currentPlayer?.nickname && (
-                        <div className="font-mono-num text-[10px] sm:text-xs text-cyan-300 uppercase tracking-widest">"{currentPlayer.nickname}"</div>
+                        <div className="font-mono-num text-[10px] text-cyan-300 uppercase tracking-widest truncate">"{currentPlayer.nickname}"</div>
                       )}
-                      <div className="mt-2 inline-flex items-center gap-1.5 font-display uppercase tracking-widest text-[10px] sm:text-xs text-slate-300">
-                        <Shield className="w-3.5 h-3.5 text-red-400" /> Team:
-                        <span className="text-white font-arcade text-xs sm:text-base">{current.teamName || "—"}</span>
+                      <div className="mt-1 inline-flex items-center gap-1.5 font-display uppercase tracking-widest text-[10px] text-slate-300">
+                        <Shield className="w-3 h-3 text-red-400" /> Team:
+                        <span className="text-white font-arcade text-[11px] sm:text-sm">{current.teamName || "—"}</span>
                       </div>
                     </div>
                   </div>
@@ -576,17 +698,32 @@ export default function DrawEvent() {
               )}
             </section>
 
-            <aside>
+            <aside className="min-w-0">
               <div className="font-display text-[10px] tracking-[0.35em] text-slate-400 uppercase mb-2">
                 Equipes {remaining > 0 ? `· ${remaining} restantes` : ""}
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2 max-h-[70vh] overflow-auto pr-1">
-                {[...teams].sort(byOrder).map((t, i) => (
-                  <TeamCard key={t.id} team={t} order={t.order ?? i} photosById={photosById} perTeam={perTeam}
-                    revealedIds={revealedIds}
-                    highlight={revealed && current?.teamId === t.id}
-                    testId={`board-team-${t.id}`} />
+              <div
+                ref={teamsListRef}
+                data-testid="teams-scroll"
+                className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2 max-h-[calc(100dvh-330px)] min-h-[220px] overflow-auto pr-1 scroll-smooth"
+              >
+                <div aria-hidden style={{ height: teamPad.top }} className="col-span-full" />
+                {orderedTeams.map((t, i) => (
+                  <div
+                    key={t.id}
+                    ref={(node) => {
+                      if (node) teamNodesRef.current.set(t.id, node);
+                      else teamNodesRef.current.delete(t.id);
+                    }}
+                    className="scroll-mt-2"
+                  >
+                    <TeamCard team={t} order={t.order ?? i} photosById={photosById} perTeam={perTeam}
+                      revealedIds={revealedIds}
+                      highlight={revealed && current?.teamId === t.id}
+                      testId={`board-team-${t.id}`} />
+                  </div>
                 ))}
+                <div aria-hidden style={{ height: teamPad.bottom }} className="col-span-full" />
               </div>
             </aside>
           </div>
