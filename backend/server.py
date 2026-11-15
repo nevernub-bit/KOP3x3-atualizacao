@@ -405,8 +405,18 @@ class MvpIn(BaseModel):
     player_id: str
 
 
+# Registrations accepted may exceed the official vacancies (teams × players per
+# team): that capacity is still what the organizer confirms and what the draw
+# uses. This only bounds the public reception queue.
+MAX_REGISTRATION_LIMIT = 1000
+
+
 class TournamentUpdate(BaseModel):
     player_limit: Optional[int] = None
+    # Additive settings: independent of the tournament structure, so they can be
+    # changed at any time (including after the official draw).
+    registration_limit: Optional[int] = Field(None, ge=1, le=MAX_REGISTRATION_LIMIT)
+    organizer_whatsapp: Optional[str] = Field(None, max_length=30)
     num_teams: Optional[int] = None
     players_per_team: Optional[int] = None
     num_groups: Optional[int] = None
@@ -567,6 +577,23 @@ def tournament_config(t: dict) -> dict:
         "capacity": num_teams * players_per_team,
         "qualifiers_total": num_groups * qualifiers_per_group,
     }
+
+
+def effective_registration_limit(t: dict) -> int:
+    """How many inscriptions the public form may receive.
+
+    Independent from the official vacancies (num_teams × players_per_team),
+    which still gate the organizer's confirmation and the draw. Documents
+    created before this setting existed fall back to the official capacity, so
+    existing tournaments keep behaving exactly as before without a migration.
+    Never lower than the official capacity and always >= 1.
+    """
+    capacity = tournament_config(t)["capacity"]
+    try:
+        configured = int((t or {}).get("registration_limit"))
+    except (TypeError, ValueError):
+        return capacity
+    return max(capacity, min(MAX_REGISTRATION_LIMIT, configured))
 
 
 def validate_structure(num_teams: int, players_per_team: int,
@@ -798,12 +825,16 @@ async def register_player(body: PlayerRegisterIn, request: Request):
     if not body.photo.startswith("data:image/"):
         raise HTTPException(400, "Formato de foto inválido")
     t = await db.tournament.find_one({"id": "main"}) or {}
-    # Only confirmed registrations occupy an official vacancy: a pending
-    # inscription never blocks a spot while the admin reviews it.
-    count = await db.players.count_documents({"status": "CONFIRMADO"})
-    capacity = tournament_config(t)["capacity"]
-    if count >= capacity:
-        raise HTTPException(400, "Limite de inscrições confirmadas atingido")
+    # Two independent numbers. Confirmed inscriptions still occupy the official
+    # vacancies (teams × players per team), enforced when the organizer approves.
+    # The reception limit only bounds how many inscriptions the form accepts:
+    # a pending inscription holds one of those slots so the review queue cannot
+    # overflow, while CANCELADO keeps the record but frees the slot.
+    received = await db.players.count_documents(
+        {"status": {"$in": ["PENDENTE", "CONFIRMADO"]}})
+    limit = effective_registration_limit(t)
+    if received >= limit:
+        raise HTTPException(400, "Limite de inscrições recebidas atingido")
     player = {
         "id": str(uuid.uuid4()), "name": body.name.strip(),
         "nickname": (body.nickname or "").strip() or None,
@@ -1035,6 +1066,7 @@ async def _ensure_test_session() -> dict:
             "num_groups": cfg["num_groups"],
             "qualifiers_per_group": cfg["qualifiers_per_group"],
             "player_limit": cfg["capacity"],
+            "registration_limit": effective_registration_limit(real_t),
             "status": "OPEN", "draw_done": False, "mvp_player_id": None,
             "default_duration_s": int(real_t.get("default_duration_s") or DEFAULT_DURATION_S),
             "live_mode": "MATCH", "live_match_id": None,
@@ -1292,6 +1324,11 @@ async def get_tournament():
     t["player_limit"] = cfg["capacity"]
     t["capacity"] = cfg["capacity"]
     t["qualifiers_total"] = cfg["qualifiers_total"]
+    # Reception limit (independent from the official vacancies) and the
+    # organizer contact shown on the Home footer. Both are read-time defaults
+    # for documents that predate these settings.
+    t["registration_limit"] = effective_registration_limit(t)
+    t["organizer_whatsapp"] = t.get("organizer_whatsapp") or None
     # Additive presentation defaults for documents created before these fields.
     for key, default in PRESENTATION_DEFAULTS.items():
         t.setdefault(key, default)
@@ -1338,6 +1375,24 @@ async def update_tournament(body: TournamentUpdate, _=Depends(require_admin)):
     for key, (low, high) in PRESENTATION_RANGES.items():
         if key in updates:
             updates[key] = min(high, max(low, updates[key]))
+    # Reception limit: independent from the structure, but it can never be
+    # lower than the official vacancies the organizer is able to confirm.
+    if "registration_limit" in data:
+        official = (
+            (data.get("num_teams") or current["num_teams"]) *
+            (data.get("players_per_team") or current["players_per_team"])
+        )
+        limit = int(data["registration_limit"])
+        if limit < official:
+            raise HTTPException(400, (
+                f"O limite de inscrições recebidas não pode ser menor que as "
+                f"{official} vagas oficiais ({data.get('num_teams') or current['num_teams']} "
+                f"equipes × {data.get('players_per_team') or current['players_per_team']} jogadores)."
+            ))
+        updates["registration_limit"] = limit
+    # Organizer contact is optional: an empty value clears it.
+    if "organizer_whatsapp" in data:
+        updates["organizer_whatsapp"] = (data["organizer_whatsapp"] or "").strip() or None
     # player_limit is derived from the structure; keep the stored value in sync.
     updates["player_limit"] = (
         (data.get("num_teams") or current["num_teams"]) *

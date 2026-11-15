@@ -21,6 +21,9 @@ export default function Admin() {
   const [playerSearch, setPlayerSearch] = useState("");
   const [cfg, setCfg] = useState({ num_teams: 10, players_per_team: 3, num_groups: 2, qualifiers_per_group: 2 });
   const [pres, setPres] = useState({ home_mode: "SELECT", home_select_seconds: 15, home_banner_seconds: 10, draw_spin_seconds: 2.6, draw_pause_seconds: 6 });
+  // Reception limit and organizer contact: independent from the structure, so
+  // they are saved separately and stay editable after the draw.
+  const [reg, setReg] = useState({ registration_limit: "", organizer_whatsapp: "" });
   const [confirmDraw, setConfirmDraw] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -83,6 +86,10 @@ export default function Admin() {
       home_banner_seconds: t.data?.home_banner_seconds ?? 10,
       draw_spin_seconds: t.data?.draw_spin_seconds ?? 2.6,
       draw_pause_seconds: t.data?.draw_pause_seconds ?? 6,
+    });
+    setReg({
+      registration_limit: t.data?.registration_limit ?? "",
+      organizer_whatsapp: t.data?.organizer_whatsapp || "",
     });
   };
   useEffect(() => {
@@ -249,6 +256,22 @@ export default function Admin() {
     sfx.save();
     toast.success("Apresentação atualizada");
   }, { refresh: false, errorMessage: "Falha ao salvar apresentação" });
+
+  // Official vacancies (teams × players per team) are still what the approval
+  // flow and the draw use; the reception limit only bounds the public form.
+  const saveRegistrationSettings = () => runAdminAction("registration-settings", async () => {
+    const r = await api.patch("/tournament", {
+      registration_limit: Number(reg.registration_limit),
+      organizer_whatsapp: (reg.organizer_whatsapp || "").trim(),
+    });
+    setTour(r.data);
+    setReg({
+      registration_limit: r.data.registration_limit ?? "",
+      organizer_whatsapp: r.data.organizer_whatsapp || "",
+    });
+    sfx.save();
+    toast.success("Inscrições e contato atualizados");
+  }, { refresh: false, errorMessage: "Falha ao salvar inscrições e contato" });
 
   const selectBanner = (file) => {
     if (!file) return;
@@ -625,7 +648,7 @@ export default function Admin() {
           ))}
         </div>
         <div className="mt-3 text-[11px] font-display uppercase tracking-widest text-slate-400 flex flex-wrap gap-x-6 gap-y-1">
-          <span>Vagas totais: <span className="text-cyan-300">{Number(cfg.num_teams || 0) * Number(cfg.players_per_team || 0)}</span></span>
+          <span>Vagas oficiais: <span className="text-cyan-300">{Number(cfg.num_teams || 0) * Number(cfg.players_per_team || 0)}</span></span>
           <span>Classificados: <span className="text-cyan-300">{Number(cfg.num_groups || 0) * Number(cfg.qualifiers_per_group || 0)}</span></span>
           <span>Inscritos: <span className="text-white">{players.length}</span></span>
         </div>
@@ -640,6 +663,58 @@ export default function Admin() {
             </span>
           )}
         </div>
+      </section>
+
+      <section data-testid="registration-settings" className="bg-black/60 border-2 border-green-500/30 kop-chamfer p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <UserCheck className="w-5 h-5 text-green-400" />
+          <h2 className="font-display text-xl text-white uppercase tracking-widest">Inscrições Recebidas & Contato</h2>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <label className="text-xs font-display uppercase tracking-widest text-slate-400">
+            Limite de inscrições recebidas
+            <input
+              data-testid="config-registration-limit"
+              type="number"
+              min={Number(cfg.num_teams || 0) * Number(cfg.players_per_team || 0) || 1}
+              max={1000}
+              value={reg.registration_limit}
+              disabled={actionBusy}
+              onChange={e => setReg(r => ({ ...r, registration_limit: e.target.value }))}
+              className="w-full mt-1 bg-slate-900 border border-slate-700 focus:border-green-400 px-3 py-2 text-white font-mono-num outline-none"
+            />
+            <span className="mt-1 block text-[10px] normal-case tracking-normal text-slate-500 font-sans">
+              Máximo de inscrições que o formulário aceita. Pode ser maior que as vagas oficiais.
+            </span>
+          </label>
+          <label className="text-xs font-display uppercase tracking-widest text-slate-400">
+            WhatsApp do organizador
+            <input
+              data-testid="config-organizer-whatsapp"
+              type="text"
+              inputMode="tel"
+              maxLength={30}
+              placeholder="+55 11 90000-0000"
+              value={reg.organizer_whatsapp}
+              disabled={actionBusy}
+              onChange={e => setReg(r => ({ ...r, organizer_whatsapp: e.target.value }))}
+              className="w-full mt-1 bg-slate-900 border border-slate-700 focus:border-green-400 px-3 py-2 text-white font-mono-num outline-none"
+            />
+            <span className="mt-1 block text-[10px] normal-case tracking-normal text-slate-500 font-sans">
+              Exibido no rodapé da Home. Use DDI + DDD; deixe em branco para ocultar.
+            </span>
+          </label>
+        </div>
+        <div className="mt-3 text-[11px] font-display uppercase tracking-widest text-slate-400 flex flex-wrap gap-x-6 gap-y-1">
+          <span>Vagas oficiais: <span className="text-cyan-300">{Number(cfg.num_teams || 0) * Number(cfg.players_per_team || 0)}</span></span>
+          <span>Recebidas: <span className="text-white">{confirmedCount + pendingList.length}</span> / <span className="text-green-400">{tour?.registration_limit ?? "—"}</span></span>
+          <span>Confirmados: <span className="text-green-400">{confirmedCount}</span></span>
+        </div>
+        <button onClick={saveRegistrationSettings} disabled={actionBusy}
+          data-testid="save-registration-settings"
+          className="mt-3 kop-chamfer bg-green-600 hover:bg-green-500 disabled:opacity-50 text-black font-arcade uppercase tracking-widest px-4 py-2 inline-flex items-center gap-2">
+          <Save className="w-4 h-4" /> {pendingAction === "registration-settings" ? "Salvando..." : "Salvar inscrições e contato"}
+        </button>
       </section>
 
       <section className="bg-black/60 border border-red-900/50 kop-chamfer p-5">

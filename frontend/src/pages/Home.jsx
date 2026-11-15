@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { PlayerSelectStrip } from "../components/CharacterSelect";
-import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv, BookOpen } from "lucide-react";
+import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv, BookOpen, MessageCircle } from "lucide-react";
 
 const ITEMS = [
   { to: "/register", key: "INSCRICOES", label: "INSCRIÇÕES", icon: UserPlus, color: "red" },
@@ -27,9 +27,20 @@ const COLOR = {
   gold: "text-amber-400 border-amber-500/60 hover:kop-glow-gold hover:border-amber-500",
 };
 
+// The organizer contact is configured in the Admin panel (tournament settings),
+// never hardcoded here. wa.me only accepts digits, so the label keeps whatever
+// the organizer typed while the link strips the formatting.
+const whatsappLink = (raw) => {
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return null;
+  const text = encodeURIComponent("Olá! Quero falar com a organização do KOP 3×3.");
+  return `https://wa.me/${digits}?text=${text}`;
+};
+
 export default function Home() {
   const [banner, setBanner] = useState(null);
   const [players, setPlayers] = useState([]);
+  const [tour, setTour] = useState(null);
 
   // One load per visit. The players endpoint answers 304 when nothing changed,
   // so returning visitors do not download the same photos again.
@@ -38,13 +49,17 @@ export default function Home() {
     Promise.all([
       api.get("/banner").catch(() => null),
       api.get("/players").catch(() => null),
-    ]).then(([b, p]) => {
+      api.get("/tournament").catch(() => null),
+    ]).then(([b, p, t]) => {
       if (!alive) return;
       setBanner(b?.data?.image || null);
       setPlayers(Array.isArray(p?.data) ? p.data : []);
+      setTour(t?.data || null);
     });
     return () => { alive = false; };
   }, []);
+
+  const contact = whatsappLink(tour?.organizer_whatsapp);
 
   // Home layout is identical in production and TEST: one moving participant
   // strip in the main content and the event banner only in the footer.
@@ -136,6 +151,47 @@ export default function Home() {
             {sponsorSlotLabel}
           </div>
         </footer>
+
+        <section
+          data-testid="home-credits"
+          className="mt-8 border-t border-red-900/30 pt-5 text-center sm:text-left"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="space-y-1">
+              <div className="font-display text-[10px] sm:text-[11px] uppercase tracking-[0.35em] text-slate-400">
+                KOP 3×3 — Kings of Paintball
+              </div>
+              <p className="text-[11px] sm:text-xs leading-relaxed text-slate-500 max-w-2xl">
+                Modelo de competição desenvolvido originalmente para este projeto.
+              </p>
+              <p className="text-[11px] sm:text-xs leading-relaxed text-slate-500 max-w-2xl">
+                É proibida a reprodução, cópia para uso comercial do formato, identidade e estrutura
+                deste evento sem autorização dos organizadores.
+              </p>
+            </div>
+
+            <div className="flex flex-col items-center sm:items-end gap-1 shrink-0">
+              <span className="font-display text-[9px] uppercase tracking-[0.3em] text-slate-600">
+                Contato
+              </span>
+              {contact ? (
+                <a
+                  href={contact}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="home-organizer-whatsapp"
+                  className="kop-chamfer inline-flex items-center gap-2 border border-green-500/50 px-3 py-2 font-display text-[10px] uppercase tracking-widest text-green-400 hover:bg-green-500/10 hover:border-green-400 transition"
+                >
+                  <MessageCircle className="w-4 h-4" /> WhatsApp
+                </a>
+              ) : (
+                <span data-testid="home-organizer-whatsapp-empty" className="font-mono-num text-[10px] text-slate-700 uppercase tracking-widest">
+                  a definir no painel
+                </span>
+              )}
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );
