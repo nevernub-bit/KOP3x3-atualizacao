@@ -134,7 +134,23 @@ def test_06_cancelled_inscription_frees_a_reception_slot(client, admin):
     assert kept.status_code == 200 and kept.json()["status"] == "CANCELADO"
 
 
-def test_07_organizer_whatsapp_round_trip(client, admin):
+def test_07_suspension_notice_defaults_active_and_is_configurable(client, admin):
+    current = client.get("/api/tournament")
+    assert current.status_code == 200
+    assert current.json()["event_temporarily_suspended"] is True
+
+    disabled = client.patch("/api/tournament", headers=admin,
+                            json={"event_temporarily_suspended": False})
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["event_temporarily_suspended"] is False
+
+    enabled = client.patch("/api/tournament", headers=admin,
+                           json={"event_temporarily_suspended": True})
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["event_temporarily_suspended"] is True
+
+
+def test_08_organizer_whatsapp_round_trip(client, admin):
     r = client.patch("/api/tournament", headers=admin,
                      json={"organizer_whatsapp": "+55 11 98888-7777"})
     assert r.status_code == 200, r.text

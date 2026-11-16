@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { PlayerSelectStrip } from "../components/CharacterSelect";
-import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv, BookOpen, MessageCircle } from "lucide-react";
+import { UserPlus, Shield, Shuffle, Grid, Swords, Trophy, Users, BarChart3, GitFork, Crown, Tv, BookOpen, MessageCircle, TriangleAlert } from "lucide-react";
 
 const ITEMS = [
   { to: "/register", key: "INSCRICOES", label: "INSCRIÇÕES", icon: UserPlus, color: "red" },
@@ -60,6 +60,7 @@ export default function Home() {
   }, []);
 
   const contact = whatsappLink(tour?.organizer_whatsapp);
+  const eventSuspended = tour?.event_temporarily_suspended ?? true;
 
   // Home layout is identical in production and TEST: one moving participant
   // strip in the main content and the event banner only in the footer.
@@ -68,6 +69,72 @@ export default function Home() {
   return (
     <div className="relative overflow-hidden">
       <div className="absolute inset-0 kop-grid-bg opacity-30 pointer-events-none" />
+
+      {eventSuspended && (
+        <>
+          <div
+            data-testid="event-suspension-ribbons-back"
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-20 overflow-hidden"
+          >
+            {[
+              { top: "9%", angle: "-7deg", label: "INTERDIÇÃO TEMPORÁRIA", mobile: true },
+              { top: "23%", angle: "6deg", label: "EVENTO SUSPENSO", mobile: false },
+              { top: "62%", angle: "-6deg", label: "EVENTO SUSPENSO", mobile: true },
+              { top: "80%", angle: "5deg", label: "INTERDIÇÃO TEMPORÁRIA", mobile: false },
+              { top: "94%", angle: "-8deg", label: "EVENTO SUSPENSO", mobile: true },
+            ].map((tape, index) => (
+              <div
+                key={`back-${index}`}
+                className={`absolute left-[-25%] flex h-5 w-[150%] items-center justify-around overflow-hidden border-y border-black/70 bg-[repeating-linear-gradient(135deg,#facc15_0px,#facc15_16px,#111827_16px,#111827_32px)] shadow-[0_3px_10px_rgba(0,0,0,0.55)] opacity-30 sm:h-7 sm:opacity-40 ${tape.mobile ? "" : "hidden md:flex"}`}
+                style={{ top: tape.top, transform: `rotate(${tape.angle})` }}
+              >
+                {Array.from({ length: 5 }, (_, i) => (
+                  <span key={i} className="shrink-0 bg-amber-300/90 px-2 py-0.5 font-display text-[8px] font-black uppercase tracking-wider text-slate-950 sm:px-3 sm:text-[10px]">
+                    {tape.label}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          <div
+            data-testid="event-suspension-overlay"
+            className="pointer-events-none absolute inset-x-0 top-[38%] z-30 flex -translate-y-1/2 justify-center px-3 sm:top-[42%] sm:px-6"
+          >
+          <div className="relative w-full max-w-3xl -rotate-1 border-2 border-amber-400/80 bg-slate-950/95 px-5 py-8 text-center shadow-[0_20px_70px_rgba(0,0,0,0.8)] sm:px-12 sm:py-10">
+            <div className="absolute inset-x-0 top-0 h-3 border-y border-black/80 bg-[repeating-linear-gradient(135deg,#facc15_0px,#facc15_12px,#111827_12px,#111827_24px)] sm:h-4" />
+            <div className="absolute inset-x-0 bottom-0 h-3 border-y border-black/80 bg-[repeating-linear-gradient(135deg,#facc15_0px,#facc15_12px,#111827_12px,#111827_24px)] sm:h-4" />
+            <div className="relative flex flex-col items-center gap-3">
+              <div className="flex items-center gap-2 font-display text-sm font-black uppercase tracking-[0.3em] text-amber-300 sm:text-base">
+                <TriangleAlert className="h-5 w-5 shrink-0" aria-hidden="true" />
+                <span>⚠ ATENÇÃO ⚠</span>
+                <TriangleAlert className="h-5 w-5 shrink-0" aria-hidden="true" />
+              </div>
+              <h2 className="font-arcade text-xl leading-tight text-white [text-shadow:0_0_20px_rgba(250,204,21,0.35)] sm:text-3xl md:text-4xl">
+                EVENTO TEMPORARIAMENTE SUSPENSO
+              </h2>
+              <p className="font-display text-xs uppercase tracking-[0.2em] text-amber-100/80 sm:text-sm">
+                Nova data será divulgada em breve.
+              </p>
+            </div>
+          </div>
+          </div>
+          <div
+            data-testid="event-suspension-ribbons-front"
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-40 overflow-hidden"
+          >
+            <div className="absolute left-[-25%] top-[45%] flex h-3 w-[150%] items-center justify-around overflow-hidden border-y border-black/70 bg-[repeating-linear-gradient(135deg,#facc15_0px,#facc15_14px,#111827_14px,#111827_28px)] shadow-[0_3px_10px_rgba(0,0,0,0.55)] opacity-35 sm:top-[55%] sm:h-4 sm:opacity-45" style={{ transform: "rotate(2deg)" }}>
+              {Array.from({ length: 5 }, (_, i) => (
+                <span key={i} className="shrink-0 bg-amber-300/90 px-2 py-0.5 font-display text-[7px] font-black uppercase tracking-wider text-slate-950 sm:px-3 sm:text-[9px]">
+                  EVENTO SUSPENSO
+                </span>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="relative max-w-6xl mx-auto px-4 py-8 sm:py-12">
         <section data-testid="home-select-mode">

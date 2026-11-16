@@ -430,6 +430,7 @@ class TournamentUpdate(BaseModel):
     home_banner_seconds: Optional[int] = None
     draw_spin_seconds: Optional[float] = None
     draw_pause_seconds: Optional[float] = None
+    event_temporarily_suspended: Optional[bool] = None
 
 
 # Defaults for the additive presentation fields. Read-time only: existing
@@ -440,6 +441,9 @@ PRESENTATION_DEFAULTS = {
     "home_banner_seconds": 10,
     "draw_spin_seconds": 2.6,
     "draw_pause_seconds": 6,
+    # Active by default for existing tournaments, without writing the field
+    # during reads/startup. The organizer can disable it from Admin.
+    "event_temporarily_suspended": True,
 }
 
 PRESENTATION_RANGES = {

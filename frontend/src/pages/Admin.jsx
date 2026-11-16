@@ -21,6 +21,7 @@ export default function Admin() {
   const [playerSearch, setPlayerSearch] = useState("");
   const [cfg, setCfg] = useState({ num_teams: 10, players_per_team: 3, num_groups: 2, qualifiers_per_group: 2 });
   const [pres, setPres] = useState({ home_mode: "SELECT", home_select_seconds: 15, home_banner_seconds: 10, draw_spin_seconds: 2.6, draw_pause_seconds: 6 });
+  const [eventSuspended, setEventSuspended] = useState(true);
   // Reception limit and organizer contact: independent from the structure, so
   // they are saved separately and stay editable after the draw.
   const [reg, setReg] = useState({ registration_limit: "", organizer_whatsapp: "" });
@@ -87,6 +88,7 @@ export default function Admin() {
       draw_spin_seconds: t.data?.draw_spin_seconds ?? 2.6,
       draw_pause_seconds: t.data?.draw_pause_seconds ?? 6,
     });
+    setEventSuspended(t.data?.event_temporarily_suspended ?? true);
     setReg({
       registration_limit: t.data?.registration_limit ?? "",
       organizer_whatsapp: t.data?.organizer_whatsapp || "",
@@ -244,6 +246,16 @@ export default function Admin() {
 
   // Presentation settings live in additive tournament fields, so saving them
   // works even after the draw (no structural change, no player data touched).
+  const saveSuspensionNotice = () => runAdminAction("suspension-notice", async () => {
+    const r = await api.patch("/tournament", {
+      event_temporarily_suspended: eventSuspended,
+    });
+    setTour(r.data);
+    setEventSuspended(r.data.event_temporarily_suspended ?? true);
+    sfx.save();
+    toast.success(eventSuspended ? "Aviso de interdição ativado" : "Aviso de interdição desativado");
+  }, { refresh: false, errorMessage: "Falha ao atualizar aviso de interdição" });
+
   const savePresentation = () => runAdminAction("presentation", async () => {
     const r = await api.patch("/tournament", {
       home_mode: pres.home_mode,
@@ -922,6 +934,31 @@ export default function Admin() {
               <div className="mt-1 text-[11px] leading-snug text-slate-500 normal-case font-sans">{m.when}</div>
             </button>
           ))}
+        </div>
+        <div data-testid="suspension-notice-setting" className="mt-4 border border-amber-500/30 bg-amber-950/10 p-3 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex-1">
+            <div className="font-display text-xs uppercase tracking-widest text-amber-300">Interdição temporária do evento</div>
+            <p className="mt-1 text-[11px] text-slate-500 font-sans">Exibe ou oculta a placa de suspensão temporária sobre a Home.</p>
+          </div>
+          <button
+            type="button"
+            data-testid="toggle-suspension-notice"
+            aria-pressed={eventSuspended}
+            onClick={() => setEventSuspended(value => !value)}
+            disabled={actionBusy}
+            className={`kop-chamfer border px-3 py-2 font-display text-xs uppercase tracking-widest disabled:opacity-50 ${eventSuspended ? "border-amber-400 text-amber-300 bg-amber-500/10" : "border-slate-600 text-slate-400"}`}
+          >
+            {eventSuspended ? "Ativo" : "Desativado"}
+          </button>
+          <button
+            type="button"
+            data-testid="save-suspension-notice"
+            onClick={saveSuspensionNotice}
+            disabled={actionBusy || eventSuspended === (tour?.event_temporarily_suspended ?? true)}
+            className="kop-chamfer bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black font-arcade uppercase tracking-widest px-3 py-2"
+          >
+            {pendingAction === "suspension-notice" ? "Salvando..." : "Salvar aviso"}
+          </button>
         </div>
         <p className="mt-2 text-[11px] text-slate-500 font-sans">
           Os tempos abaixo só valem no Modo C. Nos modos A e B a Home fica fixa na composição escolhida.
